@@ -2,7 +2,19 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>Privacy - Camera Usage Description (NSCameraUsageDescription)</key>
-	<string>Meigan uses your camera to measure distance in 3D space</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.meigan.auth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>meigan</string>
+			</array>
+		</dict>
+		<dict/>
+	</array>
 </dict>
 </plist>

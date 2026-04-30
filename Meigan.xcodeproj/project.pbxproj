@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		D330DEB92F758C00005A55CF /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = D330DEB82F758C00005A55CF /* Supabase */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		D3D997E82F479DBB00308C55 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -65,6 +69,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D330DEB92F758C00005A55CF /* Supabase in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -85,12 +90,20 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		D330DEB72F758C00005A55CF /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		D3D997D12F479DBA00308C55 = {
 			isa = PBXGroup;
 			children = (
 				D3D997DC2F479DBA00308C55 /* Meigan */,
 				D3D997EA2F479DBB00308C55 /* MeiganTests */,
 				D3D997F42F479DBB00308C55 /* MeiganUITests */,
+				D330DEB72F758C00005A55CF /* Frameworks */,
 				D3D997DB2F479DBA00308C55 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -125,6 +138,7 @@
 			);
 			name = Meigan;
 			packageProductDependencies = (
+				D330DEB82F758C00005A55CF /* Supabase */,
 			);
 			productName = Meigan;
 			productReference = D3D997DA2F479DBA00308C55 /* Meigan.app */;
@@ -208,6 +222,9 @@
 			);
 			mainGroup = D3D997D12F479DBA00308C55;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				D330DEB42F756C75005A55CF /* XCRemoteSwiftPackageReference "supabase-swift" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D3D997DB2F479DBA00308C55 /* Products */;
 			projectDirPath = "";
@@ -408,9 +425,12 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = Q4PVXQC7GX;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Meigan/Info.plist;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Meigan uses your camera to measure distance in 3D space";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Meigan can save AR screenshots you confirm in the preview to your photo library.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -441,9 +461,12 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = Q4PVXQC7GX;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Meigan/Info.plist;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Meigan uses your camera to measure distance in 3D space";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Meigan can save AR screenshots you confirm in the preview to your photo library.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -587,6 +610,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		D330DEB42F756C75005A55CF /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase/supabase-swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.5.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D330DEB82F758C00005A55CF /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D330DEB42F756C75005A55CF /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = D3D997D22F479DBA00308C55 /* Project object */;
 }

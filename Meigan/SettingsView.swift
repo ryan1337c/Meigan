@@ -7,29 +7,15 @@
 
 import SwiftUI
 
-enum MeasurementUnit: String, CaseIterable {
-    case metric = "Metric"
-    case imperial = "Imperial"
-
-    var subtitle: String {
-        switch self {
-        case .metric: return "cm, m"
-        case .imperial: return "in, ft"
-        }
-    }
-}
-
 struct SettingsView: View {
-    @AppStorage("measurementUnit") private var measurementUnit: String = MeasurementUnit.metric.rawValue
-    @State private var hapticFeedbackEnabled = true
-    @State private var magnifierWindowEnabled = false
-    @State private var autoSaveMeasurements = true
+    @EnvironmentObject private var appSession: AppSession
+    @EnvironmentObject private var settings: SettingsManager
 
     var body: some View {
         Form {
-            // Measurement Units
+
             Section {
-                Picker("Units", selection: $measurementUnit) {
+                Picker("Units", selection: $settings.measurementUnit) {
                     ForEach(MeasurementUnit.allCases, id: \.rawValue) { unit in
                         Text("\(unit.rawValue) (\(unit.subtitle))")
                             .tag(unit.rawValue)
@@ -42,19 +28,16 @@ struct SettingsView: View {
                 Text("Choose how distances are displayed in the app")
             }
 
-            // AR Precision & Feedback
             Section {
-                Toggle("Haptic Feedback", isOn: $hapticFeedbackEnabled)
-                Toggle("Magnifier Window", isOn: $magnifierWindowEnabled)
+                Toggle("Haptic Feedback", isOn: $settings.hapticFeedbackEnabled)
             } header: {
                 Label("AR Precision & Feedback", systemImage: "scope")
             } footer: {
-                Text("Haptic feedback vibrates when a point is placed. The magnifier helps you see exactly where you're targeting.")
+                Text("Haptic feedback vibrates when a point is placed.")
             }
 
-            // Data Management
             Section {
-                Toggle("Auto-save to history", isOn: $autoSaveMeasurements)
+                Toggle("Auto-save to history", isOn: $settings.autoSaveMeasurements)
                 Button {
                     // TODO: Export data
                 } label: {
@@ -76,4 +59,6 @@ struct SettingsView: View {
     NavigationStack {
         SettingsView()
     }
+    .environmentObject(AppSession())
+    .environmentObject(SettingsManager())
 }
