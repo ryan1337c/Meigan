@@ -128,7 +128,7 @@ struct ARSceneView: UIViewRepresentable {
         /// Solid geometry for all committed edges (never cleared by preview updates).
         private var committedLinesContainer: Entity?
         /// Dotted preview only while placing the free end of the current segment.
-        private var previewLinesContainer: Entity?
+        var previewLinesContainer: Entity?
         /// White spheres at deduped joints (committed vertices + draft start).
         private var vertexMarkersContainer: Entity?
         private var markerSphereMesh: MeshResource?
@@ -136,21 +136,21 @@ struct ARSceneView: UIViewRepresentable {
         /// One billboard stack (pill + text) per committed segment, oldest → newest.
         private var committedSegmentLabelsContainer: Entity?
         /// Preview readout while aiming the free end of the draft segment.
-        private var draftPreviewLabelRoot: Entity?
+        var draftPreviewLabelRoot: Entity?
         private var draftLabelPillEntity: ModelEntity?
         private var draftLabelTextEntity: ModelEntity?
         /// Shown at segment midpoint while the crosshair is on the line (label hidden for that beat).
-        private var lineMidHoverDotEntity: ModelEntity?
+        var lineMidHoverDotEntity: ModelEntity?
         /// Finished edges in chronological order (oldest first).
-        private var committedSegments: [MeasurementSegment] = []
+        var committedSegments: [MeasurementSegment] = []
         /// When non-nil, user is aiming the second endpoint of a new segment starting at this world position.
-        private var draftSegmentStart: SIMD3<Float>?
+        var draftSegmentStart: SIMD3<Float>?
         /// Translucent triangle (draft of P3) / quad (draft of P4) rendered under the measurement anchor while in flatten mode.
-        private var flattenFillPreviewContainer: Entity?
+        var flattenFillPreviewContainer: Entity?
         // Comitted fill container for flatten mode
-        private var committedFillContainer: Entity? 
+        var committedFillContainer: Entity?
         /// When non-nil, a placed Flatten corner is selected and the next surface tap moves that corner.
-        private var flattenAdjustingPointIndex: Int?
+        var flattenAdjustingPointIndex: Int?
         /// Mirrored from `ARSceneView.updateUIView` every frame. The coordinator’s `@Binding measurementModeRaw`
         /// is captured only once in `makeCoordinator` and can stay stale vs the parent’s custom `Binding` — use this for mode checks.
         var appliedMeasurementModeRaw: String = ARFooterFeature.ruler.rawValue
@@ -159,14 +159,26 @@ struct ARSceneView: UIViewRepresentable {
             appliedMeasurementModeRaw == ARFooterFeature.flatten.rawValue
         }
 
+        // MARK: - Mode controllers
+        //
+        // Mode-specific decisions (placement semantics, pin candidates, per-frame previews,
+        // line hover) are delegated to a `MeasurementModeBehavior`. `currentMode` resolves
+        // the active behavior from `appliedMeasurementModeRaw` so it always reflects the
+        // freshest mode value (the `@Binding` itself can be stale — see `appliedMeasurementModeRaw`).
+        lazy var rulerMode: RulerMeasurementMode = RulerMeasurementMode(host: self)
+        lazy var flattenMode: FlattenMeasurementMode = FlattenMeasurementMode(host: self)
+        var currentMode: MeasurementModeBehavior {
+            isFlattenMode ? flattenMode : rulerMode
+        }
+
         /// Last world position we fired an autolock haptic for (nil = unlocked).
-        private var lastAutolockedPinWorld: SIMD3<Float>?
+        var lastAutolockedPinWorld: SIMD3<Float>?
 
         /// While a finished segment exists, the pinpoint world position when the reticle is autolocked (left, right, or mid). Used to extend a new segment from that pin on place.
-        private var latestPinAutolockWorld: SIMD3<Float>?
+        var latestPinAutolockWorld: SIMD3<Float>?
 
         /// Avoids regenerating text meshes / spamming SwiftUI when the preview readout string is unchanged.
-        private var lastPreviewReadoutString: String = ""
+        var lastPreviewReadoutString: String = ""
 
         private var lastProcessedPlaceToken: Int = 0
         private var lastProcessedClearToken: Int = 0
@@ -407,7 +419,7 @@ struct ARSceneView: UIViewRepresentable {
         }
 
         /// Merge nearly-coincident world points so shared pins render as one marker.
-        private static func dedupeWorldPositions(_ points: [SIMD3<Float>], tolerance: Float) -> [SIMD3<Float>] {
+        static func dedupeWorldPositions(_ points: [SIMD3<Float>], tolerance: Float) -> [SIMD3<Float>] {
             var result: [SIMD3<Float>] = []
             result.reserveCapacity(points.count)
             for p in points {
@@ -461,21 +473,7 @@ struct ARSceneView: UIViewRepresentable {
                 arView: arView,
                 screenCenter: screenCenter
             )
-            let onLine: Bool
-            if isFlattenMode {
-                lineMidHoverDotEntity?.isEnabled = false
-                onLine = false
-            } else {
-                let onSeg = hoverPick.map { $0.screenDist <= threshold } ?? false
-                onLine = onSeg
-                if onLine, let hi = hoverPick?.index {
-                    lineMidHoverDotEntity?.position = committedSegments[hi].midpoint
-                    lineMidHoverDotEntity?.isEnabled = true
-                } else {
-                    lineMidHoverDotEntity?.isEnabled = false
-                }
-            }
-            let hoverIndex = onLine ? hoverPick?.index : nil
+            let hoverIndex = currentMode.applyLineHoverAndMidDot(hoverPick: hoverPick, threshold: threshold)
 
             for i in 0..<committedSegments.count {
                 let seg = committedSegments[i]
@@ -484,7 +482,7 @@ struct ARSceneView: UIViewRepresentable {
                     root.isEnabled = false
                     continue
                 }
-                let hideForHover = onLine && i == hoverIndex
+                let hideForHover = (hoverIndex != nil) && i == hoverIndex
                 root.isEnabled = !hideForHover
                 if hideForHover { continue }
 
@@ -546,13 +544,7 @@ struct ARSceneView: UIViewRepresentable {
                 let camForLabel = SIMD3<Float>(ct.columns.3.x, ct.columns.3.y, ct.columns.3.z)
                 let camUp = simd_normalize(SIMD3<Float>(ct.columns.1.x, ct.columns.1.y, ct.columns.1.z))
 
-                if self.isFlattenMode {
-                    if self.committedSegments.isEmpty && self.draftSegmentStart == nil {
-                        self.lastAutolockedPinWorld = nil
-                    }
-                } else if self.committedSegments.isEmpty || self.draftSegmentStart != nil {
-                    self.lastAutolockedPinWorld = nil
-                }
+                self.currentMode.resetAutolockBookkeepingIfNeeded()
                 if !self.committedSegments.isEmpty {
                     self.updateCommittedSegmentLabelsHoverAndMidDot(
                         arView: arView,
@@ -581,18 +573,7 @@ struct ARSceneView: UIViewRepresentable {
                     currentFrame.camera.transform.columns.3.z
                 )
 
-                let pinCandidates: [SIMD3<Float>]
-                if self.isFlattenMode {
-                    var pins = MeasurementSegment.endpointOnlyPinpointWorldPositions(for: self.committedSegments)
-                    if let draft = self.draftSegmentStart {
-                        pins.append(draft)
-                    }
-                    pinCandidates = Self.dedupeWorldPositions(pins, tolerance: 0.005)
-                } else if self.draftSegmentStart == nil, !self.committedSegments.isEmpty {
-                    pinCandidates = MeasurementSegment.allPinpointWorldPositions(for: self.committedSegments)
-                } else {
-                    pinCandidates = []
-                }
+                let pinCandidates = self.currentMode.pinCandidates()
                 let pinLockWorld = Self.linePinpointScreenAutolockWorld(
                     candidates: pinCandidates,
                     arView: arView,
@@ -706,13 +687,11 @@ struct ARSceneView: UIViewRepresentable {
                 self.ringEntity?.isEnabled = true
                 self.latestReticleWorldPosition = pos
 
-                if self.isFlattenMode {
-                    self.updateFlattenDraftPreview(reticleWorld: pos)
-                } else if self.draftSegmentStart != nil {
-                    self.updatePreviewLineAndLabel(reticleWorld: pos, camWorld: camForLabel, camUp: camUp)
-                }
-
-                self.updateFlattenFillPreview(hoverWorld: pos)
+                self.currentMode.updateAfterReticle(
+                    reticleWorld: pos,
+                    camWorld: camForLabel,
+                    camUp: camUp
+                )
 
                 DispatchQueue.main.async { self.hasValidTarget = true }
             }
@@ -866,130 +845,10 @@ struct ARSceneView: UIViewRepresentable {
                 // arPlacementLog.warning("placeMarkAtReticle: ABORT latestReticleWorldPosition is nil (reticle may not have written a frame yet)")
                 return
             }
-
-            if isFlattenMode {
-                placeFlattenMarkAtReticle(p)
-                return
-            }
-
-            let hadDraft = draftSegmentStart != nil
-            let segmentCountBefore = committedSegments.count
-
-            if let start = draftSegmentStart {
-                draftSegmentStart = nil
-                if simd_distance(start, p) > 1e-5 {
-                    committedSegments.append(MeasurementSegment(start: start, end: p))
-                }
-                // arPlacementLog.notice("placeMarkAtReticle: completed segment; committed count → \(self.committedSegments.count)")
-            } else {
-                if !committedSegments.isEmpty {
-                    if let pin = latestPinAutolockWorld {
-                        draftSegmentStart = pin
-                        // arPlacementLog.notice("placeMarkAtReticle: draft start at pinpoint (\(pin.x), \(pin.y), \(pin.z))")
-                    } else {
-                        draftSegmentStart = p
-                    }
-                } else {
-                    draftSegmentStart = p
-                }
-                // arPlacementLog.notice("placeMarkAtReticle: draft segment start set (was \(segmentCountBefore) committed)")
-            }
-
-            // arPlacementLog.notice("placeMarkAtReticle: reticle=(\(p.x), \(p.y), \(p.z)) hadDraft=\(hadDraft)")
-            refreshMeasurementVisuals()
+            currentMode.placeMark(at: p)
         }
 
-        private func placeFlattenMarkAtReticle(_ p: SIMD3<Float>) {
-            if let adjustingIndex = flattenAdjustingPointIndex {
-                guard latestPinAutolockWorld == nil else {
-                    arPlacementLog.notice("placeFlattenMarkAtReticle: ABORT adjusted corner target is locked to an existing corner")
-                    showPlacementWarning("Move to a valid surface before updating this corner.")
-                    return
-                }
-                updateFlattenPoint(at: adjustingIndex, to: p)
-                flattenAdjustingPointIndex = nil
-                refreshMeasurementVisuals()
-                return
-            }
-
-            if let pin = latestPinAutolockWorld {
-                guard let pinIndex = flattenPointIndex(for: pin) else {
-                    showPlacementWarning("Move to a valid surface before placing the next Flatten point.")
-                    return
-                }
-                flattenAdjustingPointIndex = pinIndex
-                showPlacementWarning("Corner \(pinIndex + 1) selected. Move to a valid surface and tap + to update it.")
-                return
-            }
-
-            guard committedSegments.count < 3 else {
-                arPlacementLog.notice("placeFlattenMarkAtReticle: ABORT four corners already placed")
-                showPlacementWarning("All 4 corners are placed. Lock onto a corner to readjust it.")
-                return
-            }
-
-            if let start = draftSegmentStart {
-                if simd_distance(start, p) > 1e-5 {
-                    committedSegments.append(MeasurementSegment(start: start, end: p))
-                }
-                draftSegmentStart = committedSegments.count >= 3 ? nil : p
-            } else if let lastEnd = committedSegments.last?.end {
-                if simd_distance(lastEnd, p) > 1e-5 {
-                    committedSegments.append(MeasurementSegment(start: lastEnd, end: p))
-                }
-                draftSegmentStart = committedSegments.count >= 3 ? nil : p
-            } else {
-                draftSegmentStart = p
-            }
-
-            refreshMeasurementVisuals()
-        }
-
-        private func flattenPlacedPoints() -> [SIMD3<Float>] {
-            if !committedSegments.isEmpty {
-                return MeasurementSegment.endpointOnlyPinpointWorldPositions(for: committedSegments)
-            }
-            if let draftSegmentStart {
-                return [draftSegmentStart]
-            }
-            return []
-        }
-
-        private func flattenPointIndex(for pin: SIMD3<Float>) -> Int? {
-            let points = flattenPlacedPoints()
-            return points.enumerated().min(by: {
-                simd_distance($0.element, pin) < simd_distance($1.element, pin)
-            }).flatMap { index, point in
-                simd_distance(point, pin) < 0.006 ? index : nil
-            }
-        }
-
-        private func updateFlattenPoint(at index: Int, to point: SIMD3<Float>) {
-            var points = flattenPlacedPoints()
-            guard points.indices.contains(index) else { return }
-            points[index] = point
-            rebuildFlattenSegments(from: points)
-        }
-
-        private func rebuildFlattenSegments(from points: [SIMD3<Float>]) {
-            committedSegments.removeAll()
-            guard !points.isEmpty else {
-                draftSegmentStart = nil
-                return
-            }
-
-            if points.count >= 2 {
-                for i in 0..<(points.count - 1) {
-                    if simd_distance(points[i], points[i + 1]) > 1e-5 {
-                        committedSegments.append(MeasurementSegment(start: points[i], end: points[i + 1]))
-                    }
-                }
-            }
-
-            draftSegmentStart = points.count >= 4 ? nil : points.last
-        }
-
-        private func showPlacementWarning(_ message: String) {
+        func showPlacementWarning(_ message: String) {
             if hapticFeedbackEnabled {
                 UINotificationFeedbackGenerator().notificationOccurred(.warning)
             }
@@ -1027,300 +886,11 @@ struct ARSceneView: UIViewRepresentable {
             }
         }
 
-        private func clearEntityChildren(_ entity: Entity?) {
+        func clearEntityChildren(_ entity: Entity?) {
             guard let entity else { return }
             for child in Array(entity.children) {
                 child.removeFromParent()
             }
-        }
-
-        // MARK: - Flatten fill preview (translucent triangle / quad under the crosshair)
-
-        /// Draws a dynamic translucent polygon while aiming the 3rd or 4th corner in flatten mode.
-        /// - 3rd corner aim (1 committed segment + draft): triangle [P1, P2, hover]
-        /// - 4th corner aim (2 committed segments + draft): quad [P1, P2, P3, hover]
-        private func updateFlattenFillPreview(hoverWorld: SIMD3<Float>) {
-            guard let container = flattenFillPreviewContainer else { return }
-
-            if let adjustingIndex = flattenAdjustingPointIndex {
-                var points = flattenPlacedPoints()
-                guard points.indices.contains(adjustingIndex), points.count >= 3 else {
-                    if !container.children.isEmpty {
-                        clearEntityChildren(container)
-                    }
-                    container.isEnabled = false
-                    return
-                }
-                points[adjustingIndex] = hoverWorld
-                guard let entity = makeFlattenFillEntity(points: points) else {
-                    if !container.children.isEmpty {
-                        clearEntityChildren(container)
-                    }
-                    container.isEnabled = false
-                    return
-                }
-
-                clearEntityChildren(container)
-                container.addChild(entity)
-                container.isEnabled = true
-                return
-            }
-
-            guard isFlattenMode, draftSegmentStart != nil else {
-                if !container.children.isEmpty {
-                    clearEntityChildren(container)
-                }
-                container.isEnabled = false
-                return
-            }
-
-            let segCount = committedSegments.count
-            guard segCount == 1 || segCount == 2 else {
-                if !container.children.isEmpty {
-                    clearEntityChildren(container)
-                }
-                container.isEnabled = false
-                return
-            }
-
-            var points: [SIMD3<Float>] = []
-            points.append(committedSegments[0].start)
-            points.append(committedSegments[0].end)
-            if segCount == 2 {
-                points.append(committedSegments[1].end)
-            }
-            points.append(hoverWorld)
-
-            // Skip degenerate polygons (repeated / near-collinear last point).
-            if simd_distance(points[points.count - 2], points[points.count - 1]) < 1e-4 {
-                if !container.children.isEmpty {
-                    clearEntityChildren(container)
-                }
-                container.isEnabled = false
-                return
-            }
-
-            // Hide preview if P4 is inside triangle P1-P2-P3
-            if points.count == 4 && isPointInsideTriangle(points[3], points[0], points[1], points[2]) {
-                if !container.children.isEmpty {
-                    clearEntityChildren(container)
-                }
-                container.isEnabled = false
-                return
-            }
-
-            guard let entity = makeFlattenFillEntity(points: points) else {
-                if !container.children.isEmpty {
-                    clearEntityChildren(container)
-                }
-                container.isEnabled = false
-                return
-            }
-
-            clearEntityChildren(container)
-            container.addChild(entity)
-            container.isEnabled = true
-        }
-
-        private func updateFlattenDraftPreview(reticleWorld: SIMD3<Float>) {
-            guard let lineContainer = previewLinesContainer else { return }
-
-            draftPreviewLabelRoot?.isEnabled = false
-            lastPreviewReadoutString = ""
-            clearEntityChildren(lineContainer)
-
-            if let adjustingIndex = flattenAdjustingPointIndex {
-                let points = flattenPlacedPoints()
-                guard points.indices.contains(adjustingIndex) else {
-                    lineContainer.isEnabled = false
-                    return
-                }
-
-                if adjustingIndex > 0 {
-                    addDottedLine(from: points[adjustingIndex - 1], to: reticleWorld, in: lineContainer)
-                }
-                if adjustingIndex + 1 < points.count {
-                    addDottedLine(from: points[adjustingIndex + 1], to: reticleWorld, in: lineContainer)
-                }
-                if points.count == 4, adjustingIndex == 3 {
-                    let edge = closestBaseTriangleEdge(to: reticleWorld, p1: points[0], p2: points[1], p3: points[2])
-                    clearEntityChildren(lineContainer)
-                    addDottedLine(from: edge.0, to: reticleWorld, in: lineContainer)
-                    addDottedLine(from: edge.1, to: reticleWorld, in: lineContainer)
-                }
-                lineContainer.isEnabled = !lineContainer.children.isEmpty
-                return
-            }
-
-            guard draftSegmentStart != nil else {
-                lineContainer.isEnabled = false
-                return
-            }
-
-            switch committedSegments.count {
-            case 0:
-                guard let start = draftSegmentStart else {
-                    lineContainer.isEnabled = false
-                    return
-                }
-                addDottedLine(from: start, to: reticleWorld, in: lineContainer)
-
-            case 1:
-                addDottedLine(from: committedSegments[0].end, to: reticleWorld, in: lineContainer)
-
-            case 2:
-                let p1 = committedSegments[0].start
-                let p2 = committedSegments[0].end
-                let p3 = committedSegments[1].end
-                let edge = closestBaseTriangleEdge(to: reticleWorld, p1: p1, p2: p2, p3: p3)
-                addDottedLine(from: edge.0, to: reticleWorld, in: lineContainer)
-                addDottedLine(from: edge.1, to: reticleWorld, in: lineContainer)
-
-            default:
-                lineContainer.isEnabled = false
-                return
-            }
-
-            lineContainer.isEnabled = !lineContainer.children.isEmpty
-        }
-
-        private func closestBaseTriangleEdge(
-            to point: SIMD3<Float>,
-            p1: SIMD3<Float>,
-            p2: SIMD3<Float>,
-            p3: SIMD3<Float>
-        ) -> (SIMD3<Float>, SIMD3<Float>) {
-            let distToEdge12 = distanceFromPointToSegment3D(point, p1, p2)
-            let distToEdge23 = distanceFromPointToSegment3D(point, p2, p3)
-            let distToEdge31 = distanceFromPointToSegment3D(point, p3, p1)
-
-            if distToEdge12 <= distToEdge23 && distToEdge12 <= distToEdge31 {
-                return (p1, p2)
-            }
-            if distToEdge23 <= distToEdge31 {
-                return (p2, p3)
-            }
-            return (p3, p1)
-        }
-
-        /// Builds a double-sided triangle-fan mesh over `points` (>= 3) with a translucent teal material.
-        private func makeFlattenFillEntity(points: [SIMD3<Float>]) -> ModelEntity? {
-            guard points.count >= 3 else { return nil }
-
-            var descriptor = MeshDescriptor(name: "FlattenFillPreview")
-
-            var positions: [SIMD3<Float>] = []
-            var indices: [UInt32] = []
-
-            // Front-facing triangles
-            for p in points { positions.append(p) }
-            
-            if points.count == 3 {
-                // Simple triangle
-                indices.append(contentsOf: [0, 1, 2])
-            } else if points.count == 4 {
-                // Keep the base triangle (P1-P2-P3) and add one extra triangle from P4
-                // to whichever edge of the base triangle is closest.
-                indices.append(contentsOf: [0, 1, 2])
-
-                // Find which edge of triangle P1-P2-P3 is closest to P4
-                let p1 = points[0], p2 = points[1], p3 = points[2], p4 = points[3]
-                
-                let distToEdge12 = distanceFromPointToSegment3D(p4, p1, p2)
-                let distToEdge23 = distanceFromPointToSegment3D(p4, p2, p3)
-                let distToEdge31 = distanceFromPointToSegment3D(p4, p3, p1)
-                
-                if distToEdge12 <= distToEdge23 && distToEdge12 <= distToEdge31 {
-                    // Closest to P1-P2: connect P4 to that edge
-                    // Triangles: [P1,P2,P4]
-                    indices.append(contentsOf: [0, 1, 3])
-                } else if distToEdge23 <= distToEdge31 {
-                    // Closest to P2-P3: connect P4 to that edge
-                    // Triangles: [P2,P3,P4]
-                    indices.append(contentsOf: [1, 2, 3])
-                } else {
-                    // Closest to P3-P1: connect P4 to that edge
-                    // Triangles: [P3,P1,P4] 
-                    indices.append(contentsOf: [2, 0, 3])
-                }
-            }
-
-            // Back-facing triangles (duplicated verts, reversed winding for double-sided visibility)
-            let backOffset = UInt32(positions.count)
-            for p in points { positions.append(p) }
-            
-            if points.count == 3 {
-                indices.append(contentsOf: [backOffset + 0, backOffset + 2, backOffset + 1])
-            } else if points.count == 4 {
-                // Back face for base triangle (reverse winding)
-                indices.append(contentsOf: [backOffset + 0, backOffset + 2, backOffset + 1])
-
-                let p1 = points[0], p2 = points[1], p3 = points[2], p4 = points[3]
-                
-                let distToEdge12 = distanceFromPointToSegment3D(p4, p1, p2)
-                let distToEdge23 = distanceFromPointToSegment3D(p4, p2, p3)
-                let distToEdge31 = distanceFromPointToSegment3D(p4, p3, p1)
-                
-                if distToEdge12 <= distToEdge23 && distToEdge12 <= distToEdge31 {
-                    indices.append(contentsOf: [backOffset + 0, backOffset + 3, backOffset + 1])
-                 
-                } else if distToEdge23 <= distToEdge31 {
-                    indices.append(contentsOf: [backOffset + 1, backOffset + 3, backOffset + 2])
-            
-                } else {
-                    indices.append(contentsOf: [backOffset + 2, backOffset + 3, backOffset + 0])
-                  
-                }
-            }
-
-            descriptor.positions = MeshBuffers.Positions(positions)
-            descriptor.primitives = .triangles(indices)
-
-            do {
-                let mesh = try MeshResource.generate(from: [descriptor])
-                var material = UnlitMaterial()
-                material.color = .init(tint: .systemTeal)
-                material.blending = .transparent(opacity: .init(floatLiteral: 0.3))
-                return ModelEntity(mesh: mesh, materials: [material])
-            } catch {
-                arPlacementLog.warning("makeFlattenFillEntity: mesh generation failed: \(error.localizedDescription, privacy: .public)")
-                return nil
-            }
-        }
-
-        // Calculate 3D distance from point to line segment
-        private func distanceFromPointToSegment3D(_ p: SIMD3<Float>, _ a: SIMD3<Float>, _ b: SIMD3<Float>) -> Float {
-            let ab = b - a
-            let ap = p - a
-            let ab2 = simd_length_squared(ab)
-            
-            if ab2 < 1e-8 {
-                return simd_distance(p, a)
-            }
-            
-            var t = simd_dot(ap, ab) / ab2
-            t = min(max(t, 0), 1)  // Clamp to [0, 1] for segment
-            let closest = a + t * ab
-            return simd_distance(p, closest)
-        }
-
-
-        // Test if point is inside triangle using barycentric coordinates (projected to XZ plane)
-        private func isPointInsideTriangle(_ p: SIMD3<Float>, _ a: SIMD3<Float>, _ b: SIMD3<Float>, _ c: SIMD3<Float>) -> Bool {
-            // 2D cross product helper (projects to horizontal XZ plane)
-            func sign(_ p1: SIMD3<Float>, _ p2: SIMD3<Float>, _ p3: SIMD3<Float>) -> Float {
-                return (p1.x - p3.x) * (p2.z - p3.z) - (p2.x - p3.x) * (p1.z - p3.z)
-            }
-            
-            let d1 = sign(p, a, b)
-            let d2 = sign(p, b, c)
-            let d3 = sign(p, c, a)
-            
-            let hasNeg = (d1 < 0) || (d2 < 0) || (d3 < 0)
-            let hasPos = (d1 > 0) || (d2 > 0) || (d3 > 0)
-            
-            // Point is inside if all signs are the same (all positive or all negative)
-            return !(hasNeg && hasPos)
         }
 
         private func rebuildCommittedLineGeometry() {
@@ -1394,14 +964,14 @@ struct ARSceneView: UIViewRepresentable {
             addDottedLine(from: a, direction: dir, length: len, in: container)
         }
 
-        private func addDottedLine(from a: SIMD3<Float>, to b: SIMD3<Float>, in container: Entity) {
+        func addDottedLine(from a: SIMD3<Float>, to b: SIMD3<Float>, in container: Entity) {
             let delta = b - a
             let len = simd_length(delta)
             guard len > 1e-5 else { return }
             addDottedLine(from: a, direction: delta / len, length: len, in: container)
         }
 
-        private func addDottedLine(from a: SIMD3<Float>, direction dir: SIMD3<Float>, length len: Float, in container: Entity) {
+        func addDottedLine(from a: SIMD3<Float>, direction dir: SIMD3<Float>, length len: Float, in container: Entity) {
             guard let mesh = lineDashSegmentMesh else { return }
             var mat = UnlitMaterial()
             mat.color = .init(tint: .white.withAlphaComponent(0.95))
@@ -1424,50 +994,6 @@ struct ARSceneView: UIViewRepresentable {
             }
         }
 
-       private func rebuildCommittedFillGeometry() {
-            guard let container = committedFillContainer else { return }
-            clearEntityChildren(container)
-            
-            arPlacementLog.notice("rebuildCommittedFillGeometry: isFlattenMode=\(self.isFlattenMode) segCount=\(self.committedSegments.count)")
-            
-            guard isFlattenMode, !committedSegments.isEmpty else {
-                container.isEnabled = false
-                arPlacementLog.notice("rebuildCommittedFillGeometry: ABORT not flatten mode or no segments")
-                return
-            }
-            
-            let segCount = committedSegments.count
-            var points: [SIMD3<Float>] = []
-            
-            if segCount >= 1 {
-                points.append(committedSegments[0].start)
-                points.append(committedSegments[0].end)
-            }
-            if segCount >= 2 {
-                points.append(committedSegments[1].end)
-            }
-            if segCount >= 3 {
-                points.append(committedSegments[2].end)
-            }
-            
-            arPlacementLog.notice("rebuildCommittedFillGeometry: points.count=\(points.count)")
-            
-            guard points.count >= 3 else {
-                container.isEnabled = false
-                arPlacementLog.notice("rebuildCommittedFillGeometry: ABORT insufficient points for fill")
-                return
-            }
-            
-            if let entity = makeFlattenFillEntity(points: points) {
-                container.addChild(entity)
-                container.isEnabled = true
-                arPlacementLog.notice("rebuildCommittedFillGeometry: ✅ fill entity created and enabled")
-            } else {
-                container.isEnabled = false
-                arPlacementLog.notice("rebuildCommittedFillGeometry: ❌ makeFlattenFillEntity returned nil")
-            }
-        }
-
         private func clearSingleMarkPreviewVisuals() {
             guard draftSegmentStart != nil else { return }
             previewLinesContainer?.isEnabled = false
@@ -1480,7 +1006,7 @@ struct ARSceneView: UIViewRepresentable {
         }
 
         /// Dotted preview from draft start to current reticle while placing the free end.
-        private func updatePreviewLineAndLabel(reticleWorld: SIMD3<Float>, camWorld: SIMD3<Float>, camUp: SIMD3<Float>) {
+        func updatePreviewLineAndLabel(reticleWorld: SIMD3<Float>, camWorld: SIMD3<Float>, camUp: SIMD3<Float>) {
             guard let start = draftSegmentStart,
                   let lineContainer = previewLinesContainer,
                   let labelRoot = draftPreviewLabelRoot
@@ -1527,7 +1053,7 @@ struct ARSceneView: UIViewRepresentable {
             labelRoot.isEnabled = true
         }
 
-        private func refreshMeasurementVisuals() {
+        func refreshMeasurementVisuals() {
             guard let committedC = committedLinesContainer,
                   let previewC = previewLinesContainer,
                   vertexMarkersContainer != nil,
@@ -1547,7 +1073,7 @@ struct ARSceneView: UIViewRepresentable {
             rebuildCommittedLineGeometry()
             rebuildVertexMarkerEntities()
             rebuildCommittedSegmentLabelEntities()
-            rebuildCommittedFillGeometry()
+            currentMode.rebuildCommittedFillGeometry()
 
             let currentSegmentCount = self.committedSegments.count
             DispatchQueue.main.async {
