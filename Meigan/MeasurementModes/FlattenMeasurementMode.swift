@@ -53,7 +53,6 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
         if let adjustingIndex = host.flattenAdjustingPointIndex {
             guard host.latestPinAutolockWorld == nil else {
                 arPlacementLog.notice("placeFlattenMarkAtReticle: ABORT adjusted corner target is locked to an existing corner")
-                host.showPlacementWarning("Move to a valid surface before updating this corner.")
                 return
             }
             updateFlattenPoint(at: adjustingIndex, to: p)
@@ -64,17 +63,21 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
 
         if let pin = host.latestPinAutolockWorld {
             guard let pinIndex = flattenPointIndex(for: pin) else {
-                host.showPlacementWarning("Move to a valid surface before placing the next Flatten point.")
+                host.showPlacementWarning("Move to a valid surface before placing the next Flatten point.", kind: .alert)
                 return
             }
             host.flattenAdjustingPointIndex = pinIndex
-            host.showPlacementWarning("Corner \(pinIndex + 1) selected. Move to a valid surface and tap + to update it.")
+            host.refreshMeasurementVisuals()
+            host.showPlacementWarning(
+                "Corner \(pinIndex + 1) selected — move to the new position, then tap +",
+                kind: .instruction
+            )
             return
         }
 
         guard host.committedSegments.count < 3 else {
             arPlacementLog.notice("placeFlattenMarkAtReticle: ABORT four corners already placed")
-            host.showPlacementWarning("All 4 corners are placed. Lock onto a corner to readjust it.")
+            host.showPlacementWarning("All 4 corners are placed. Lock onto a corner to readjust it.", kind: .instruction)
             return
         }
 
@@ -93,6 +96,64 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
         }
 
         host.refreshMeasurementVisuals()
+    }
+
+    func startScan() {
+        guard let host, let arView = host.arView else {
+            cancelScan(message: "Scan cancelled. AR view is not ready.")
+            return
+        }
+        guard !host.isFlattenScanActive else { return }
+
+        let points = Array(flattenPlacedPoints().prefix(4))
+        guard points.count == 4, host.flattenAdjustingPointIndex == nil else {
+            cancelScan(message: "Scan cancelled. Complete the 4 corners first.")
+            return
+        }
+
+        guard allPointsVisible(points, in: arView) else {
+            host.showPlacementWarning("Aim the camera so all 4 corners are visible, then tap Scan.", kind: .instruction)
+            return
+        }
+
+
+        arView.snapshot(saveToHDR: false) { [weak self, weak host, weak arView] image in
+            DispatchQueue.main.async {
+                guard let self, let host, let arView, let image else { return }
+                let currentPoints = Array(self.flattenPlacedPoints().prefix(4))
+                guard Self.pointsMatch(points, currentPoints),
+                      self.allPointsVisible(currentPoints, in: arView)
+                else {
+                    host.showPlacementWarning("Aim the camera so all 4 corners are visible, then tap Scan.", kind: .instruction)
+                    return
+                }
+
+                let previewImage = Self.croppedScanImage(from: image, around: currentPoints, in: arView)
+                self.beginScan(with: previewImage, points: currentPoints)
+            }
+        }
+    }
+
+    private func beginScan(with previewImage: UIImage, points: [SIMD3<Float>]) {
+        guard let host else {
+            cancelScan(message: "Scan cancelled. AR view is not ready.")
+            return
+        }
+
+        host.flattenScanPreviewImage = previewImage
+        host.flattenScanSigmas = []
+        host.isFlattenScanActive = true
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let sigmas = Self.singularValues(for: points)
+            let minimumAnimationDuration: TimeInterval = 1.2
+            DispatchQueue.main.asyncAfter(deadline: .now() + minimumAnimationDuration) {
+                host.flattenScanSigmas = sigmas
+                host.isFlattenScanActive = false
+                host.flattenScanPreviewImage = nil
+                host.showPlacementWarning(Self.scanCompleteMessage(sigmas: sigmas), kind: .instruction)
+            }
+        }
     }
 
     func rebuildCommittedFillGeometry() {
@@ -141,6 +202,42 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
 
     // MARK: - Flatten geometry helpers
 
+    private func cancelScan(message: String) {
+        guard let host else { return }
+        DispatchQueue.main.async {
+            host.isFlattenScanActive = false
+            host.flattenScanPreviewImage = nil
+            host.flattenScanSigmas = []
+            host.showPlacementWarning(message, kind: .alert)
+        }
+    }
+
+    private static func scanCompleteMessage(sigmas: [Float]) -> String {
+        let values = sigmas.map { String(format: "%.4f", $0) }.joined(separator: ", ")
+        return "Scan complete. sigmas: \(values)"
+    }
+
+    private static func pointsMatch(_ lhs: [SIMD3<Float>], _ rhs: [SIMD3<Float>]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return zip(lhs, rhs).allSatisfy { simd_distance($0, $1) < 0.0005 }
+    }
+
+    private func allPointsVisible(_ points: [SIMD3<Float>], in arView: ARView) -> Bool {
+        guard points.count == 4 else { return false }
+        let bounds = arView.bounds.insetBy(dx: 12, dy: 12)
+        return points.allSatisfy { point in
+            guard let projected = arView.project(point) else { return false }
+            return bounds.contains(projected)
+        }
+    }
+
+    /// True when the quad is complete and every corner projects inside the AR view (same gate as `startScan`).
+    func scanCornersVisible(in arView: ARView) -> Bool {
+        let points = Array(flattenPlacedPoints().prefix(4))
+        guard points.count == 4 else { return false }
+        return allPointsVisible(points, in: arView)
+    }
+
     private func flattenPlacedPoints() -> [SIMD3<Float>] {
         guard let host else { return [] }
         if !host.committedSegments.isEmpty {
@@ -185,6 +282,121 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
         }
 
         host.draftSegmentStart = points.count >= 4 ? nil : points.last
+    }
+
+    private static func croppedScanImage(
+        from image: UIImage,
+        around points: [SIMD3<Float>],
+        in arView: ARView
+    ) -> UIImage {
+        guard let cgImage = image.cgImage, !points.isEmpty else { return image }
+
+        let projected = points.compactMap { arView.project($0) }
+        guard projected.count == points.count else { return image }
+
+        let xs = projected.map(\.x)
+        let ys = projected.map(\.y)
+        let padding: CGFloat = 28
+        let viewBounds = arView.bounds
+        let minX = max((xs.min() ?? 0) - padding, viewBounds.minX)
+        let maxX = min((xs.max() ?? viewBounds.maxX) + padding, viewBounds.maxX)
+        let minY = max((ys.min() ?? 0) - padding, viewBounds.minY)
+        let maxY = min((ys.max() ?? viewBounds.maxY) + padding, viewBounds.maxY)
+
+        guard maxX > minX, maxY > minY, viewBounds.width > 0, viewBounds.height > 0 else {
+            return image
+        }
+
+        let scaleX = CGFloat(cgImage.width) / viewBounds.width
+        let scaleY = CGFloat(cgImage.height) / viewBounds.height
+        let cropRect = CGRect(
+            x: minX * scaleX,
+            y: minY * scaleY,
+            width: (maxX - minX) * scaleX,
+            height: (maxY - minY) * scaleY
+        )
+        .integral
+        .intersection(CGRect(x: 0, y: 0, width: CGFloat(cgImage.width), height: CGFloat(cgImage.height)))
+
+        guard !cropRect.isNull,
+              cropRect.width > 1,
+              cropRect.height > 1,
+              let cropped = cgImage.cropping(to: cropRect)
+        else {
+            return image
+        }
+
+        return UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation)
+    }
+
+    private static func singularValues(for points: [SIMD3<Float>]) -> [Float] {
+        guard !points.isEmpty else { return [0, 0, 0] }
+
+        let count = Float(points.count)
+        let centroid = points.reduce(SIMD3<Float>(repeating: 0), +) / count
+        var covariance = Array(repeating: Array(repeating: 0.0, count: 3), count: 3)
+
+        for point in points {
+            let centered = point - centroid
+            let v = [Double(centered.x), Double(centered.y), Double(centered.z)]
+            for row in 0..<3 {
+                for col in 0..<3 {
+                    covariance[row][col] += v[row] * v[col]
+                }
+            }
+        }
+
+        return jacobiEigenvaluesSymmetric3(covariance)
+            .map { Float(sqrt(max($0, 0))) }
+            .sorted(by: >)
+    }
+
+    private static func jacobiEigenvaluesSymmetric3(_ matrix: [[Double]]) -> [Double] {
+        var a = matrix
+        let iterations = 32
+
+        for _ in 0..<iterations {
+            var p = 0
+            var q = 1
+            var largest = abs(a[0][1])
+
+            let pairs = [(0, 2), (1, 2)]
+            for pair in pairs {
+                let value = abs(a[pair.0][pair.1])
+                if value > largest {
+                    largest = value
+                    p = pair.0
+                    q = pair.1
+                }
+            }
+
+            if largest < 1e-12 { break }
+
+            let app = a[p][p]
+            let aqq = a[q][q]
+            let apq = a[p][q]
+            let tau = (aqq - app) / (2 * apq)
+            let sign = tau >= 0 ? 1.0 : -1.0
+            let t = sign / (abs(tau) + sqrt(1 + tau * tau))
+            let c = 1 / sqrt(1 + t * t)
+            let s = t * c
+
+            for k in 0..<3 where k != p && k != q {
+                let akp = a[k][p]
+                let akq = a[k][q]
+                a[k][p] = c * akp - s * akq
+                a[p][k] = a[k][p]
+                a[k][q] = s * akp + c * akq
+                a[q][k] = a[k][q]
+            }
+
+            a[p][p] = c * c * app - 2 * s * c * apq + s * s * aqq
+            a[q][q] = s * s * app + 2 * s * c * apq + c * c * aqq
+            a[p][q] = 0
+            a[q][p] = 0
+        }
+
+        return [a[0][0], a[1][1], a[2][2]]
     }
 
     // MARK: - Flatten previews (draft polyline + fill polygon)

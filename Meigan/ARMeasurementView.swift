@@ -30,11 +30,18 @@ struct ARMeasurementView: View {
     @State private var placeMarkToken = 0
     @State private var clearMarksToken = 0
     @State private var screenshotToken = 0
+    @State private var flattenScanToken = 0
     @State private var screenshotPreviewImage: UIImage?
+    @State private var flattenScanPreviewImage: UIImage?
+    @State private var isFlattenScanActive = false
+    @State private var flattenScanSigmas: [Float] = []
+    @State private var flattenScanCornersReady = false
     @State private var showShareSheet = false
     @State private var shareSheetItems: [Any] = []
     @State private var placementWarningMessage = ""
     @State private var placementWarningToken = 0
+    @State private var placementBannerKind: PlacementBannerKind = .alert
+    @State private var flattenRelocationActive = false
     @State private var isARSessionActive = true
 
     // Simple trigger to recreate/reset the AR view
@@ -68,9 +75,16 @@ struct ARMeasurementView: View {
                             clearMarksToken: $clearMarksToken,
                             screenshotToken: $screenshotToken,
                             screenshotPreviewImage: $screenshotPreviewImage,
+                            flattenScanToken: $flattenScanToken,
+                            flattenScanPreviewImage: $flattenScanPreviewImage,
+                            isFlattenScanActive: $isFlattenScanActive,
+                            flattenScanSigmas: $flattenScanSigmas,
+                            flattenScanCornersReady: $flattenScanCornersReady,
                             hapticFeedbackEnabled: $settings.hapticFeedbackEnabled,
                             placementWarningMessage: $placementWarningMessage,
-                            placementWarningToken: $placementWarningToken
+                            placementWarningToken: $placementWarningToken,
+                            placementBannerKind: $placementBannerKind,
+                            flattenRelocationActive: $flattenRelocationActive
                         )
                         .id(arSessionResetID)
                     } else {
@@ -84,9 +98,13 @@ struct ARMeasurementView: View {
                         selectedFeature: selectedFeature,
                         markCount: markCount,
                         flattenSegmentCount: flattenSegmentCount,
+                        flattenRelocationActive: flattenRelocationActive,
+                        flattenScanCornersReady: flattenScanCornersReady,
                         placementWarningMessage: placementWarningMessage,
+                        placementBannerKind: placementBannerKind,
                         profileInitial: profileInitial,
                         onStartScan: {
+                            flattenScanToken += 1
                             arMeasurementUILog.notice("Start Scan tapped")
                         },
                         onSelectFeature: { selectedFeature = $0 },
@@ -138,6 +156,10 @@ struct ARMeasurementView: View {
                             }
                         )
                     }
+
+                    if let preview = flattenScanPreviewImage, isFlattenScanActive {
+                        FlattenScanPreviewOverlay(image: preview)
+                    }
                 }
                 .sheet(isPresented: $showShareSheet, onDismiss: { shareSheetItems = [] }) {
                     ActivityView(activityItems: shareSheetItems)
@@ -154,6 +176,7 @@ struct ARMeasurementView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
                         if placementWarningToken == currentToken {
                             placementWarningMessage = ""
+                            placementBannerKind = .alert
                         }
                     }
                 }
@@ -168,6 +191,8 @@ struct ARMeasurementView: View {
         .onDisappear {
             isARSessionActive = false
             screenshotPreviewImage = nil
+            flattenScanPreviewImage = nil
+            isFlattenScanActive = false
         }
         .onChange(of: scenePhase) { phase in
             isARSessionActive = (phase == .active) && !showAccount && !showSettings
@@ -302,6 +327,76 @@ private struct ScreenshotPreviewOverlay: View {
     }
 }
 
+private struct FlattenScanPreviewOverlay: View {
+    let image: UIImage
+    @State private var scanOffset: CGFloat = -0.45
+
+    var body: some View {
+        GeometryReader { proxy in
+            // Large preview card: most of the safe width, tall enough to read the cropped quad clearly.
+            let width = min(proxy.size.width * 0.92, 460)
+            let height = min(proxy.size.height * 0.68, width * 0.95)
+
+            ZStack {
+                Color.black.opacity(0.18)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {}
+
+                VStack(spacing: 12) {
+                    Text("Scanning surface")
+                        .font(.headline.weight(.semibold))
+
+                    ZStack {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: width, height: height)
+                            .clipped()
+
+                        LinearGradient(
+                            colors: [
+                                .clear,
+                                Color.cyan.opacity(0.22),
+                                Color.white.opacity(0.92),
+                                Color.cyan.opacity(0.22),
+                                .clear
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 40)
+                        .offset(y: scanOffset * height)
+                        .shadow(color: .cyan.opacity(0.55), radius: 14)
+                    }
+                    .frame(width: width, height: height)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.28), lineWidth: 1)
+                    )
+
+                    Text("Analyzing plane geometry…")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.82))
+                }
+                .foregroundStyle(.white)
+                .padding(18)
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                .padding(.horizontal, 10)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .onAppear {
+                scanOffset = -0.45
+                withAnimation(.easeInOut(duration: 1.05).repeatForever(autoreverses: true)) {
+                    scanOffset = 0.45
+                }
+            }
+        }
+    }
+}
+
 private struct ActivityView: UIViewControllerRepresentable {
     let activityItems: [Any]
 
@@ -312,6 +407,42 @@ private struct ActivityView: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
+/// Capsule below the primary hint — same layout and styling for AR-driven placement messages (`.instruction` / `.alert`) and SwiftUI-only guides that swap in the same slot.
+private struct OverlayGuideBanner: View {
+    let text: String
+    let kind: PlacementBannerKind
+
+    private var trimmed: String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        Group {
+            if !trimmed.isEmpty {
+                Text(trimmed)
+                    .font(.subheadline.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(kind == .instruction ? Color.white.opacity(0.92) : Color.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(
+                        Capsule()
+                            .fill(kind == .instruction ? Color.black.opacity(0.42) : Color.red.opacity(0.88))
+                    )
+                    .overlay {
+                        if kind == .instruction {
+                            Capsule()
+                                .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+                        }
+                    }
+                    .padding(.top, 4)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: trimmed)
+    }
+}
+
 // View for crosshair, buttons, etc.
 private struct OverlaysView: View {
     let isCoachingActive: Bool
@@ -320,7 +451,10 @@ private struct OverlaysView: View {
     let selectedFeature: ARFooterFeature
     let markCount: Int
     let flattenSegmentCount: Int
+    let flattenRelocationActive: Bool
+    let flattenScanCornersReady: Bool
     let placementWarningMessage: String
+    let placementBannerKind: PlacementBannerKind
     let profileInitial: String
     let onStartScan: () -> Void
     let onSelectFeature: (ARFooterFeature) -> Void
@@ -332,6 +466,9 @@ private struct OverlaysView: View {
     let onLogOut: () -> Void
 
     private var hintText: String {
+        if selectedFeature == .flatten && flattenRelocationActive {
+            return "Move crosshair to the new corner, then tap +"
+        }
         if selectedFeature == .flatten {
             switch flattenSegmentCount {
             case 0:
@@ -341,6 +478,12 @@ private struct OverlaysView: View {
             case 2:
                 return "Flatten: aim corner 4, quad preview follows the crosshair"
             default:
+                if flattenSegmentCount >= 3 && !flattenRelocationActive {
+                    if !flattenScanCornersReady {
+                        return "Flatten complete — frame all four corners"
+                    }
+                    return "Flatten complete — Start Scan or tap Clear to restart"
+                }
                 return "Flatten complete — tap Clear to restart"
             }
         }
@@ -353,6 +496,30 @@ private struct OverlaysView: View {
             return "Tap + for a new edge (lock to a pin to extend from it)"
         }
     }
+
+    /// Same capsule as coordinator `showPlacementWarning(..., .instruction)` messages (“Corner …”, “All 4 corners…”).
+    private var secondaryGuideText: String {
+        if !placementWarningMessage.isEmpty {
+            return placementWarningMessage
+        }
+        if selectedFeature == .flatten,
+           flattenSegmentCount >= 3,
+           !flattenRelocationActive,
+           !flattenScanCornersReady {
+            return Self.scanCornersUnavailableGuide
+        }
+        return ""
+    }
+
+    private var secondaryGuideKind: PlacementBannerKind {
+        if !placementWarningMessage.isEmpty {
+            return placementBannerKind
+        }
+        return .instruction
+    }
+
+    private static let scanCornersUnavailableGuide =
+        "Start Scan is unavailable until all four corner marks appear inside the frame."
 
     var body: some View {
         ZStack {
@@ -389,35 +556,36 @@ private struct OverlaysView: View {
                         .clipShape(Capsule())
                         .padding(.top, 4)
 
-                    if !placementWarningMessage.isEmpty {
-                        Text(placementWarningMessage)
-                            .font(.subheadline.weight(.semibold))
-                            .multilineTextAlignment(.center)
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(Color.red.opacity(0.88))
-                            .clipShape(Capsule())
-                            .padding(.top, 4)
-                            .transition(.move(edge: .top).combined(with: .opacity))
-                    }
+                    OverlayGuideBanner(text: secondaryGuideText, kind: secondaryGuideKind)
 
                     Spacer()
 
                     VStack(spacing: 10) {
-                        if selectedFeature == .flatten && flattenSegmentCount >= 3 {
-                            Button {
-                                onStartScan()
-                            } label: {
-                                Label("Start Scan", systemImage: "viewfinder")
-                                    .font(.headline.weight(.semibold))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 12)
+                        if selectedFeature == .flatten && flattenSegmentCount >= 3 && !flattenRelocationActive {
+                            VStack(spacing: 8) {
+                                Button {
+                                    onStartScan()
+                                } label: {
+                                    Label("Start Scan", systemImage: "viewfinder")
+                                        .font(.headline.weight(.semibold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 12)
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundColor(.white)
+                                .background(
+                                    flattenScanCornersReady
+                                        ? Color(red: 0.38, green: 0.58, blue: 0.92)
+                                        : Color.white.opacity(0.22)
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 16))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 16)
+                                        .strokeBorder(Color.white.opacity(flattenScanCornersReady ? 0 : 0.35), lineWidth: 1)
+                                )
+                                .disabled(!flattenScanCornersReady)
+                                .opacity(flattenScanCornersReady ? 1 : 0.72)
                             }
-                            .buttonStyle(.plain)
-                            .foregroundColor(.white)
-                            .background(Color(red: 0.38, green: 0.58, blue: 0.92))
-                            .clipShape(RoundedRectangle(cornerRadius: 16))
                             .padding(.horizontal, 16)
                         }
 

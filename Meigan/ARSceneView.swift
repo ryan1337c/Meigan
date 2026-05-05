@@ -95,9 +95,16 @@ struct ARSceneView: UIViewRepresentable {
     @Binding var clearMarksToken: Int
     @Binding var screenshotToken: Int
     @Binding var screenshotPreviewImage: UIImage?
+    @Binding var flattenScanToken: Int
+    @Binding var flattenScanPreviewImage: UIImage?
+    @Binding var isFlattenScanActive: Bool
+    @Binding var flattenScanSigmas: [Float]
+    @Binding var flattenScanCornersReady: Bool
     @Binding var hapticFeedbackEnabled: Bool
     @Binding var placementWarningMessage: String
     @Binding var placementWarningToken: Int
+    @Binding var placementBannerKind: PlacementBannerKind
+    @Binding var flattenRelocationActive: Bool
 
     class Coordinator: NSObject, ARCoachingOverlayViewDelegate, ARSessionDelegate {
         @Binding var isCoachingActive: Bool
@@ -113,9 +120,15 @@ struct ARSceneView: UIViewRepresentable {
         @Binding var measurementModeRaw: String
         @Binding var measurementUnitRaw: String
         @Binding var screenshotPreviewImage: UIImage?
+        @Binding var flattenScanPreviewImage: UIImage?
+        @Binding var isFlattenScanActive: Bool
+        @Binding var flattenScanSigmas: [Float]
+        @Binding var flattenScanCornersReady: Bool
         @Binding var hapticFeedbackEnabled: Bool
         @Binding var placementWarningMessage: String
         @Binding var placementWarningToken: Int
+        @Binding var placementBannerKind: PlacementBannerKind
+        @Binding var flattenRelocationActive: Bool
 
         private var ringAnchor: AnchorEntity?
         private var ringEntity: ModelEntity?
@@ -183,6 +196,7 @@ struct ARSceneView: UIViewRepresentable {
         private var lastProcessedPlaceToken: Int = 0
         private var lastProcessedClearToken: Int = 0
         private var lastProcessedScreenshotToken: Int = 0
+        private var lastProcessedFlattenScanToken: Int = 0
         private var lastSyncedMeasurementUnitRaw: String = ""
         private var lastSyncedMeasurementModeRaw: String = ARFooterFeature.ruler.rawValue
 
@@ -205,6 +219,8 @@ struct ARSceneView: UIViewRepresentable {
         private var consecutiveBadTrackingFrames = 0
         private let badTrackingThreshold = 6
 
+        private var lastFlattenScanCornersReady = false
+
         init(
             isCoachingActive: Binding<Bool>,
             isRelocalizing: Binding<Bool>,
@@ -215,9 +231,15 @@ struct ARSceneView: UIViewRepresentable {
             measurementModeRaw: Binding<String>,
             measurementUnitRaw: Binding<String>,
             screenshotPreviewImage: Binding<UIImage?>,
+            flattenScanPreviewImage: Binding<UIImage?>,
+            isFlattenScanActive: Binding<Bool>,
+            flattenScanSigmas: Binding<[Float]>,
+            flattenScanCornersReady: Binding<Bool>,
             hapticFeedbackEnabled: Binding<Bool>,
             placementWarningMessage: Binding<String>,
-            placementWarningToken: Binding<Int>
+            placementWarningToken: Binding<Int>,
+            placementBannerKind: Binding<PlacementBannerKind>,
+            flattenRelocationActive: Binding<Bool>
         ) {
             _isCoachingActive = isCoachingActive
             _isRelocalizing = isRelocalizing
@@ -228,9 +250,15 @@ struct ARSceneView: UIViewRepresentable {
             _measurementModeRaw = measurementModeRaw
             _measurementUnitRaw = measurementUnitRaw
             _screenshotPreviewImage = screenshotPreviewImage
+            _flattenScanPreviewImage = flattenScanPreviewImage
+            _isFlattenScanActive = isFlattenScanActive
+            _flattenScanSigmas = flattenScanSigmas
+            _flattenScanCornersReady = flattenScanCornersReady
             _hapticFeedbackEnabled = hapticFeedbackEnabled
             _placementWarningMessage = placementWarningMessage
             _placementWarningToken = placementWarningToken
+            _placementBannerKind = placementBannerKind
+            _flattenRelocationActive = flattenRelocationActive
         }
 
         deinit {
@@ -509,12 +537,30 @@ struct ARSceneView: UIViewRepresentable {
 
         // MARK: - Per-frame update loop
 
+        private func publishFlattenScanCornersReady(_ arView: ARView) {
+            let ready: Bool
+            if isFlattenMode,
+               flattenAdjustingPointIndex == nil,
+               committedSegments.count == 3,
+               draftSegmentStart == nil {
+                ready = flattenMode.scanCornersVisible(in: arView)
+            } else {
+                ready = false
+            }
+            guard ready != lastFlattenScanCornersReady else { return }
+            lastFlattenScanCornersReady = ready
+            DispatchQueue.main.async {
+                self.flattenScanCornersReady = ready
+            }
+        }
+
         func startUpdateLoop() {
             guard let arView else { return }
 
             updateSubscription = arView.scene.subscribe(to: SceneEvents.Update.self) {
                 [weak self] _ in
                 guard let self = self, let arView = self.arView else { return }
+                self.publishFlattenScanCornersReady(arView)
                 let now = CACurrentMediaTime()
 
                 guard let currentFrame = arView.session.currentFrame else {
@@ -798,6 +844,20 @@ struct ARSceneView: UIViewRepresentable {
             captureScreenshotForPreview()
         }
 
+        func syncFlattenScanTokenIfNeeded(token: Int) {
+            guard token != lastProcessedFlattenScanToken else { return }
+            lastProcessedFlattenScanToken = token
+            guard isFlattenMode else { return }
+
+            // `updateUIView` is a SwiftUI view update. Starting the scan mutates bindings
+            // (`isFlattenScanActive`, overlay image, banner text), so defer it one turn
+            // to avoid "Modifying state during view update" and to let the overlay render.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isFlattenMode else { return }
+                self.flattenMode.startScan()
+            }
+        }
+
         /// Renders the AR view to an image; parent shows preview and runs Save / Share only after explicit confirmation.
         private func captureScreenshotForPreview() {
             guard let arView = arView else { return }
@@ -848,11 +908,12 @@ struct ARSceneView: UIViewRepresentable {
             currentMode.placeMark(at: p)
         }
 
-        func showPlacementWarning(_ message: String) {
-            if hapticFeedbackEnabled {
+        func showPlacementWarning(_ message: String, kind: PlacementBannerKind = .alert) {
+            if kind == .alert, hapticFeedbackEnabled {
                 UINotificationFeedbackGenerator().notificationOccurred(.warning)
             }
             DispatchQueue.main.async {
+                self.placementBannerKind = kind
                 self.placementWarningMessage = message
                 self.placementWarningToken += 1
             }
@@ -862,6 +923,7 @@ struct ARSceneView: UIViewRepresentable {
             committedSegments.removeAll()
             draftSegmentStart = nil
             flattenAdjustingPointIndex = nil
+            lastFlattenScanCornersReady = false
             committedLinesContainer?.isEnabled = false
             previewLinesContainer?.isEnabled = false
             clearEntityChildren(committedLinesContainer)
@@ -883,6 +945,11 @@ struct ARSceneView: UIViewRepresentable {
                 self.measurementReadout = "—"
                 self.markCount = 0
                 self.flattenSegmentCount = 0
+                self.flattenRelocationActive = false
+                self.isFlattenScanActive = false
+                self.flattenScanPreviewImage = nil
+                self.flattenScanSigmas = []
+                self.flattenScanCornersReady = false
             }
         }
 
@@ -1075,11 +1142,13 @@ struct ARSceneView: UIViewRepresentable {
             rebuildCommittedSegmentLabelEntities()
             currentMode.rebuildCommittedFillGeometry()
 
-            let currentSegmentCount = self.committedSegments.count
+            let rawSegmentCount = self.committedSegments.count
+            let publishedFlattenCount = self.flattenAdjustingPointIndex != nil ? 0 : rawSegmentCount
             DispatchQueue.main.async {
-                if self.flattenSegmentCount != currentSegmentCount {
-                    self.flattenSegmentCount = currentSegmentCount
+                if self.flattenSegmentCount != publishedFlattenCount {
+                    self.flattenSegmentCount = publishedFlattenCount
                 }
+                self.flattenRelocationActive = (self.flattenAdjustingPointIndex != nil)
             }
 
             clearEntityChildren(previewC)
@@ -1409,9 +1478,15 @@ struct ARSceneView: UIViewRepresentable {
             measurementModeRaw: $measurementModeRaw,
             measurementUnitRaw: $measurementUnitRaw,
             screenshotPreviewImage: $screenshotPreviewImage,
+            flattenScanPreviewImage: $flattenScanPreviewImage,
+            isFlattenScanActive: $isFlattenScanActive,
+            flattenScanSigmas: $flattenScanSigmas,
+            flattenScanCornersReady: $flattenScanCornersReady,
             hapticFeedbackEnabled: $hapticFeedbackEnabled,
             placementWarningMessage: $placementWarningMessage,
-            placementWarningToken: $placementWarningToken
+            placementWarningToken: $placementWarningToken,
+            placementBannerKind: $placementBannerKind,
+            flattenRelocationActive: $flattenRelocationActive
         )
     }
 
@@ -1464,6 +1539,7 @@ struct ARSceneView: UIViewRepresentable {
         context.coordinator.syncMeasurementModeFromSwiftUI(measurementModeRaw)
         context.coordinator.syncPlaceAndClearTokensIfNeeded(placeToken: placeMarkToken, clearToken: clearMarksToken)
         context.coordinator.syncScreenshotTokenIfNeeded(token: screenshotToken)
+        context.coordinator.syncFlattenScanTokenIfNeeded(token: flattenScanToken)
         context.coordinator.syncMeasurementUnitFromSwiftUI(measurementUnitRaw)
     }
 
@@ -1486,8 +1562,15 @@ struct ARSceneView: UIViewRepresentable {
         clearMarksToken: .constant(0),
         screenshotToken: .constant(0),
         screenshotPreviewImage: .constant(nil),
+        flattenScanToken: .constant(0),
+        flattenScanPreviewImage: .constant(nil),
+        isFlattenScanActive: .constant(false),
+        flattenScanSigmas: .constant([]),
+        flattenScanCornersReady: .constant(false),
         hapticFeedbackEnabled: .constant(true),
         placementWarningMessage: .constant(""),
-        placementWarningToken: .constant(0)
+        placementWarningToken: .constant(0),
+        placementBannerKind: .constant(.alert),
+        flattenRelocationActive: .constant(false)
     )
 }
