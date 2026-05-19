@@ -33,6 +33,8 @@ struct ARMeasurementView: View {
     @State private var flattenScanToken = 0
     @State private var screenshotPreviewImage: UIImage?
     @State private var flattenScanPreviewImage: UIImage?
+    @State private var flattenScanResultImage: UIImage?
+    @State private var flattenShapeFindings: [FlattenShapeFinding] = []
     @State private var isFlattenScanActive = false
     @State private var flattenScanSigmas: [Float] = []
     @State private var flattenScanCornersReady = false
@@ -41,7 +43,10 @@ struct ARMeasurementView: View {
     @State private var placementWarningMessage = ""
     @State private var placementWarningToken = 0
     @State private var placementBannerKind: PlacementBannerKind = .alert
+    @State private var photoSavedBannerMessage: String?
+    @State private var photoSavedBannerDismissToken = 0
     @State private var flattenRelocationActive = false
+    @State private var flattenFooterHeight: CGFloat = 0
     @State private var isARSessionActive = true
 
     // Simple trigger to recreate/reset the AR view
@@ -77,6 +82,8 @@ struct ARMeasurementView: View {
                             screenshotPreviewImage: $screenshotPreviewImage,
                             flattenScanToken: $flattenScanToken,
                             flattenScanPreviewImage: $flattenScanPreviewImage,
+                            flattenScanResultImage: $flattenScanResultImage,
+                            flattenShapeFindings: $flattenShapeFindings,
                             isFlattenScanActive: $isFlattenScanActive,
                             flattenScanSigmas: $flattenScanSigmas,
                             flattenScanCornersReady: $flattenScanCornersReady,
@@ -84,7 +91,8 @@ struct ARMeasurementView: View {
                             placementWarningMessage: $placementWarningMessage,
                             placementWarningToken: $placementWarningToken,
                             placementBannerKind: $placementBannerKind,
-                            flattenRelocationActive: $flattenRelocationActive
+                            flattenRelocationActive: $flattenRelocationActive,
+                            flattenFooterHeight: $flattenFooterHeight
                         )
                         .id(arSessionResetID)
                     } else {
@@ -102,6 +110,7 @@ struct ARMeasurementView: View {
                         flattenScanCornersReady: flattenScanCornersReady,
                         placementWarningMessage: placementWarningMessage,
                         placementBannerKind: placementBannerKind,
+                        photoSavedBannerMessage: photoSavedBannerMessage,
                         profileInitial: profileInitial,
                         onStartScan: {
                             flattenScanToken += 1
@@ -110,9 +119,6 @@ struct ARMeasurementView: View {
                         onSelectFeature: { selectedFeature = $0 },
                         onScreenshot: {
                             screenshotToken += 1
-                            if settings.hapticFeedbackEnabled {
-                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            }
                         },
                         onPlaceMark: {
                             guard hasValidTarget else {
@@ -138,6 +144,11 @@ struct ARMeasurementView: View {
                         },
                         onLogOut: {
                             appSession.logOut()
+                        },
+                        onFooterHeightChange: { height in
+                            let clamped = max(0, height)
+                            guard abs(clamped - flattenFooterHeight) > 0.5 else { return }
+                            flattenFooterHeight = clamped
                         }
                     )
 
@@ -159,6 +170,28 @@ struct ARMeasurementView: View {
 
                     if let preview = flattenScanPreviewImage, isFlattenScanActive {
                         FlattenScanPreviewOverlay(image: preview)
+                    }
+
+                    if let result = flattenScanResultImage, !isFlattenScanActive {
+                        FlattenWarpResultInspectOverlay(
+                            image: result,
+                            findings: flattenShapeFindings,
+                            measurementUnit: MeasurementUnit.from(storage: settings.measurementUnit),
+                            onDismiss: {
+                                flattenScanResultImage = nil
+                                flattenShapeFindings = []
+                            },
+                            onSave: { exportImage in
+                                saveScreenshotToPhotoLibrary(exportImage) {
+                                    flattenScanResultImage = nil
+                                    flattenShapeFindings = []
+                                }
+                            },
+                            onShare: { exportImage in
+                                shareSheetItems = [exportImage]
+                                showShareSheet = true
+                            }
+                        )
                     }
                 }
                 .sheet(isPresented: $showShareSheet, onDismiss: { shareSheetItems = [] }) {
@@ -192,6 +225,8 @@ struct ARMeasurementView: View {
             isARSessionActive = false
             screenshotPreviewImage = nil
             flattenScanPreviewImage = nil
+            flattenScanResultImage = nil
+            flattenShapeFindings = []
             isFlattenScanActive = false
         }
         .onChange(of: scenePhase) { phase in
@@ -215,6 +250,18 @@ struct ARMeasurementView: View {
         return appSession.isGuest ? "G" : "?"
     }
 
+    private func presentPhotoSavedBanner() {
+        photoSavedBannerMessage = "Saved to Photos"
+        photoSavedBannerDismissToken += 1
+        let dismissToken = photoSavedBannerDismissToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
+            if photoSavedBannerDismissToken == dismissToken {
+                photoSavedBannerMessage = nil
+            }
+        }
+    }
+
+    /// Shared by AR screenshot preview and flatten scan result — banner + haptic only after a successful library save.
     private func saveScreenshotToPhotoLibrary(_ image: UIImage, onSuccess: @escaping () -> Void) {
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
             guard status == .authorized || status == .limited else { return }
@@ -222,10 +269,12 @@ struct ARMeasurementView: View {
                 PHAssetChangeRequest.creationRequestForAsset(from: image)
             } completionHandler: { success, _ in
                 DispatchQueue.main.async {
-                    if success {
+                    guard success else { return }
+                    onSuccess()
+                    if settings.hapticFeedbackEnabled {
                         UINotificationFeedbackGenerator().notificationOccurred(.success)
-                        onSuccess()
                     }
+                    presentPhotoSavedBanner()
                 }
             }
         }
@@ -276,54 +325,385 @@ private struct ExplainerView: View {
 }
 
 private struct ScreenshotPreviewOverlay: View {
+    var title = "Screenshot"
+    /// When non-nil, caps image height (points). When nil, the image can use the full screen.
+    var imageMaxHeight: CGFloat?
     let image: UIImage
     let onDismiss: () -> Void
     let onSave: () -> Void
     let onShare: () -> Void
 
     var body: some View {
-        ZStack {
-            Color.black.opacity(0.85)
-                .ignoresSafeArea()
+        GeometryReader { geo in
+            let imageHeight = min(geo.size.height, imageMaxHeight ?? .infinity)
 
-            VStack(spacing: 18) {
-                Text("Screenshot")
-                    .font(.headline)
+            ZStack {
+                Color.black
+                    .ignoresSafeArea()
 
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFit()
-                    .frame(maxHeight: 320)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .frame(width: geo.size.width, height: imageHeight)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                HStack(spacing: 10) {
-                    Button {
-                        onShare()
-                    } label: {
-                        Text("Share")
+                VStack(spacing: 0) {
+                    Text(title)
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 20)
+                        .padding(.top, geo.safeAreaInsets.top + 12)
+                        .padding(.bottom, 14)
+                        .background(.ultraThinMaterial)
+
+                    Spacer()
+
+                    VStack(spacing: 10) {
+                        HStack(spacing: 10) {
+                            Button {
+                                onShare()
+                            } label: {
+                                Text("Share")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            Button {
+                                onSave()
+                            } label: {
+                                Text("Save")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+
+                        Button("Done", action: onDismiss)
+                            .buttonStyle(.bordered)
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-
-                    Button {
-                        onSave()
-                    } label: {
-                        Text("Save")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 14)
+                    .padding(.bottom, geo.safeAreaInsets.bottom + 16)
+                    .background(.ultraThinMaterial)
                 }
-
-                Button("Done", action: onDismiss)
-                    .buttonStyle(.bordered)
-                    .frame(maxWidth: .infinity)
+                .foregroundStyle(.white)
             }
-            .foregroundStyle(.white)
-            .padding(22)
-            .background(.thinMaterial)
-            .cornerRadius(20)
-            .padding(.horizontal, 20)
+            .ignoresSafeArea()
         }
+    }
+}
+
+/// Full-color warped result with SwiftUI vector box strokes aligned to `scaledToFit` letterboxing; tap maps to image pixels (smallest clipped bbox wins on overlap).
+private struct FlattenWarpResultInspectOverlay: View {
+    let image: UIImage
+    let findings: [FlattenShapeFinding]
+    let measurementUnit: MeasurementUnit
+    let onDismiss: () -> Void
+    let onSave: (UIImage) -> Void
+    let onShare: (UIImage) -> Void
+
+    @State private var selectedFindingId: UUID?
+
+    var body: some View {
+        GeometryReader { geo in
+            let container = CGSize(width: geo.size.width, height: geo.size.height)
+            let pixelSize = Self.warpedImagePixelSize(image)
+            let imageAspect = pixelSize.width / max(pixelSize.height, 1)
+            let displayed = Self.letterboxedImageRect(container: container, imageAspect: imageAspect)
+
+            ZStack {
+                Color.black
+                    .ignoresSafeArea()
+
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                ZStack(alignment: .topLeading) {
+                    ForEach(findings) { finding in
+                        let r = Self.viewRect(
+                            forImageRect: finding.boundingRectImage,
+                            imagePixelSize: pixelSize,
+                            displayedInContainer: displayed
+                        )
+                        let isSelected = finding.id == selectedFindingId
+                        Rectangle()
+                            .stroke(Color.black.opacity(0.8), lineWidth: isSelected ? 5.5 : 4)
+                            .overlay(
+                                Rectangle()
+                                    .stroke(isSelected ? Color.yellow : Color.cyan, lineWidth: isSelected ? 3.5 : 2.25)
+                            )
+                            .frame(width: r.width, height: r.height)
+                            .position(x: r.midX, y: r.midY)
+                    }
+
+                    if let selected = findings.first(where: { $0.id == selectedFindingId }) {
+                        let anchor = Self.viewRect(
+                            forImageRect: selected.boundingRectImage,
+                            imagePixelSize: pixelSize,
+                            displayedInContainer: displayed
+                        )
+                        let center = Self.popupCenter(
+                            anchorRect: anchor,
+                            container: container,
+                            safeInsets: geo.safeAreaInsets
+                        )
+                        selectionPopup(for: selected)
+                            .position(x: center.x, y: center.y)
+                            .transition(.asymmetric(
+                                insertion: .scale(scale: 0.92, anchor: .center).combined(with: .opacity),
+                                removal: .opacity
+                            ))
+                            .animation(.spring(response: 0.32, dampingFraction: 0.82), value: selectedFindingId)
+                            .allowsHitTesting(false)
+                            .zIndex(2)
+                    }
+
+                    Color.clear
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            SpatialTapGesture()
+                                .onEnded { value in
+                                    selectFinding(
+                                        at: value.location,
+                                        displayedImageRect: displayed,
+                                        imagePixelSize: pixelSize
+                                    )
+                                }
+                        )
+                }
+                .frame(width: geo.size.width, height: geo.size.height)
+
+                VStack(spacing: 0) {
+                    Text("Flattened Surface")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 20)
+                        .padding(.top, geo.safeAreaInsets.top + 12)
+                        .padding(.bottom, 14)
+                        .background(.ultraThinMaterial)
+
+                    Spacer()
+                        .allowsHitTesting(false)
+
+                    VStack(spacing: 10) {
+                        HStack(spacing: 10) {
+                            Button {
+                                onShare(exportImageForAlbum())
+                            } label: {
+                                Text("Share")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            Button {
+                                onSave(exportImageForAlbum())
+                            } label: {
+                                Text("Save")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+
+                        Button("Done", action: onDismiss)
+                            .buttonStyle(.bordered)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 14)
+                    .padding(.bottom, geo.safeAreaInsets.bottom + 16)
+                    .background(.ultraThinMaterial)
+                }
+                .foregroundStyle(.white)
+            }
+            .ignoresSafeArea()
+            .onChange(of: findings) { _ in
+                selectedFindingId = nil
+            }
+        }
+    }
+
+    /// Warped bitmap plus boxes/labels in image pixel space (what Save/Share must write, not `image` alone).
+    private func exportImageForAlbum() -> UIImage {
+        FlattenWarpedExportImage.imageWithOverlays(
+            base: image,
+            findings: findings,
+            unit: measurementUnit,
+            highlightedFindingId: selectedFindingId
+        )
+    }
+
+    /// Floating card next to the focused bounding box.
+    private func selectionPopup(for finding: FlattenShapeFinding) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Selected region")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                metricRow(label: "Width", value: formatLength(finding.widthMeters))
+                metricRow(label: "Height", value: formatLength(finding.heightMeters))
+                metricRow(label: "Perimeter", value: formatLength(finding.perimeterMeters))
+            }
+            .font(.subheadline.weight(.medium).monospacedDigit())
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .frame(minWidth: 200, maxWidth: 260, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .shadow(color: .black.opacity(0.45), radius: 18, y: 10)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.55),
+                            Color.white.opacity(0.12)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
+        }
+    }
+
+    private func metricRow(label: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Text(value)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+
+    /// Places the popup above the box when there is room, otherwise below; clamps to safe area.
+    private static func popupCenter(
+        anchorRect r: CGRect,
+        container: CGSize,
+        safeInsets: EdgeInsets
+    ) -> CGPoint {
+        let margin: CGFloat = 14
+        let popupW: CGFloat = 260
+        let popupH: CGFloat = 132
+        let gap: CGFloat = 10
+
+        var x = r.midX
+        var yAbove = r.minY - gap - popupH * 0.5
+        let minY = safeInsets.top + margin + popupH * 0.5
+        let maxY = container.height - safeInsets.bottom - margin - popupH * 0.5
+        var y: CGFloat
+        if yAbove >= minY {
+            y = yAbove
+        } else {
+            y = r.maxY + gap + popupH * 0.5
+            y = min(y, maxY)
+        }
+        y = min(max(y, minY), maxY)
+
+        let halfW = popupW * 0.5
+        x = min(max(x, margin + halfW), container.width - margin - halfW)
+
+        return CGPoint(x: x, y: y)
+    }
+
+    private func formatLength(_ meters: Float) -> String {
+        MeasurementUnit.formatFlattenDistance(meters: meters, unit: measurementUnit)
+    }
+
+    private func selectFinding(at containerPoint: CGPoint, displayedImageRect displayed: CGRect, imagePixelSize: CGSize) {
+        guard displayed.contains(containerPoint),
+              displayed.width > 0, displayed.height > 0,
+              imagePixelSize.width > 0, imagePixelSize.height > 0
+        else {
+            setSelectedFinding(nil)
+            return
+        }
+
+        let ix = (containerPoint.x - displayed.minX) / displayed.width * imagePixelSize.width
+        let iy = (containerPoint.y - displayed.minY) / displayed.height * imagePixelSize.height
+        setSelectedFinding(Self.findingId(atImagePoint: CGPoint(x: ix, y: iy), in: findings))
+    }
+
+    private func setSelectedFinding(_ id: UUID?) {
+        var transaction = Transaction()
+        transaction.animation = nil
+        withTransaction(transaction) {
+            selectedFindingId = id
+        }
+    }
+
+    private static func warpedImagePixelSize(_ image: UIImage) -> CGSize {
+        if let cg = image.cgImage {
+            return CGSize(width: CGFloat(cg.width), height: CGFloat(cg.height))
+        }
+        return CGSize(
+            width: image.size.width * image.scale,
+            height: image.size.height * image.scale
+        )
+    }
+
+    private static func letterboxedImageRect(container: CGSize, imageAspect: CGFloat) -> CGRect {
+        guard container.width > 0, container.height > 0, imageAspect > 0 else {
+            return .zero
+        }
+        let containerAspect = container.width / container.height
+        if containerAspect > imageAspect {
+            let height = container.height
+            let width = height * imageAspect
+            let x = (container.width - width) * 0.5
+            return CGRect(x: x, y: 0, width: width, height: height)
+        } else {
+            let width = container.width
+            let height = width / imageAspect
+            let y = (container.height - height) * 0.5
+            return CGRect(x: 0, y: y, width: width, height: height)
+        }
+    }
+
+    private static func viewRect(
+        forImageRect imageRect: CGRect,
+        imagePixelSize: CGSize,
+        displayedInContainer displayed: CGRect
+    ) -> CGRect {
+        guard imagePixelSize.width > 0, imagePixelSize.height > 0,
+              displayed.width > 0, displayed.height > 0
+        else { return .zero }
+        let sx = displayed.width / imagePixelSize.width
+        let sy = displayed.height / imagePixelSize.height
+        return CGRect(
+            x: displayed.minX + imageRect.minX * sx,
+            y: displayed.minY + imageRect.minY * sy,
+            width: imageRect.width * sx,
+            height: imageRect.height * sy
+        )
+    }
+
+    /// Overlapping boxes: smallest clipped `boundingRectImage` area wins (matches plan). Near-equal areas use lexicographically smaller `UUID` for a stable pick.
+    private static func findingId(atImagePoint point: CGPoint, in findings: [FlattenShapeFinding]) -> UUID? {
+        var bestId: UUID?
+        var bestArea = CGFloat.greatestFiniteMagnitude
+        let tieEps: CGFloat = 1e-3
+        for f in findings {
+            guard f.boundingRectImage.contains(point) else { continue }
+            let area = f.boundingRectImage.width * f.boundingRectImage.height
+            if area < bestArea - tieEps {
+                bestArea = area
+                bestId = f.id
+            } else if abs(area - bestArea) <= tieEps {
+                if bestId == nil || f.id.uuidString < bestId!.uuidString {
+                    bestArea = area
+                    bestId = f.id
+                }
+            }
+        }
+        return bestId
     }
 }
 
@@ -333,9 +713,17 @@ private struct FlattenScanPreviewOverlay: View {
 
     var body: some View {
         GeometryReader { proxy in
-            // Large preview card: most of the safe width, tall enough to read the cropped quad clearly.
-            let width = min(proxy.size.width * 0.92, 460)
-            let height = min(proxy.size.height * 0.68, width * 0.95)
+            let insets = proxy.safeAreaInsets
+            let edgeMargin: CGFloat = 16
+            let maxCardWidth = min(proxy.size.width - edgeMargin * 2, 460)
+            let safeHeight = proxy.size.height - insets.top - insets.bottom
+            /// Title + subtitle + `VStack` spacing + card padding — keep preview within visible safe band.
+            let verticalChrome: CGFloat = 152
+            let previewWidth = max(1, maxCardWidth - 36)
+            let previewHeight = min(
+                previewWidth * 0.92,
+                max(120, safeHeight * 0.88 - verticalChrome)
+            )
 
             ZStack {
                 Color.black.opacity(0.18)
@@ -343,50 +731,61 @@ private struct FlattenScanPreviewOverlay: View {
                     .contentShape(Rectangle())
                     .onTapGesture {}
 
-                VStack(spacing: 12) {
-                    Text("Scanning surface")
-                        .font(.headline.weight(.semibold))
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
 
-                    ZStack {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: width, height: height)
-                            .clipped()
+                    VStack(spacing: 12) {
+                        Text("Scanning surface")
+                            .font(.headline.weight(.semibold))
+                            .multilineTextAlignment(.center)
 
-                        LinearGradient(
-                            colors: [
-                                .clear,
-                                Color.cyan.opacity(0.22),
-                                Color.white.opacity(0.92),
-                                Color.cyan.opacity(0.22),
-                                .clear
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
+                        ZStack {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: previewWidth, height: previewHeight)
+                                .clipped()
+
+                            LinearGradient(
+                                colors: [
+                                    .clear,
+                                    Color.cyan.opacity(0.22),
+                                    Color.white.opacity(0.92),
+                                    Color.cyan.opacity(0.22),
+                                    .clear
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .frame(height: min(40, previewHeight * 0.22))
+                            .offset(y: scanOffset * previewHeight)
+                            .shadow(color: .cyan.opacity(0.55), radius: 14)
+                        }
+                        .frame(width: previewWidth, height: previewHeight)
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.28), lineWidth: 1)
                         )
-                        .frame(height: 40)
-                        .offset(y: scanOffset * height)
-                        .shadow(color: .cyan.opacity(0.55), radius: 14)
-                    }
-                    .frame(width: width, height: height)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.28), lineWidth: 1)
-                    )
 
-                    Text("Analyzing plane geometry…")
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.82))
+                        Text("Analyzing plane geometry…")
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.82))
+                            .multilineTextAlignment(.center)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(18)
+                    .frame(width: maxCardWidth)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+
+                    Spacer(minLength: 0)
                 }
-                .foregroundStyle(.white)
-                .padding(18)
-                .background(.ultraThinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                .padding(.horizontal, 10)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.horizontal, edgeMargin)
+                .padding(.top, insets.top)
+                .padding(.bottom, insets.bottom)
             }
+            .frame(width: proxy.size.width, height: proxy.size.height)
             .onAppear {
                 scanOffset = -0.45
                 withAnimation(.easeInOut(duration: 1.05).repeatForever(autoreverses: true)) {
@@ -405,6 +804,34 @@ private struct ActivityView: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+/// Shown in the top guidance slot after the user saves an image to the photo library.
+private struct TopDownNoticeBanner: View {
+    let message: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.body.weight(.semibold))
+            Text(message)
+                .font(.subheadline.weight(.semibold))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .background(
+            Capsule()
+                .fill(Color(red: 0.18, green: 0.55, blue: 0.34).opacity(0.94))
+        )
+        .overlay {
+            Capsule()
+                .strokeBorder(Color.white.opacity(0.28), lineWidth: 1)
+        }
+        .padding(.horizontal, 4)
+        .allowsHitTesting(false)
+    }
 }
 
 /// Capsule below the primary hint — same layout and styling for AR-driven placement messages (`.instruction` / `.alert`) and SwiftUI-only guides that swap in the same slot.
@@ -455,6 +882,8 @@ private struct OverlaysView: View {
     let flattenScanCornersReady: Bool
     let placementWarningMessage: String
     let placementBannerKind: PlacementBannerKind
+    /// When set, top guidance is hidden and this banner occupies that slot (e.g. after Save to Photos).
+    let photoSavedBannerMessage: String?
     let profileInitial: String
     let onStartScan: () -> Void
     let onSelectFeature: (ARFooterFeature) -> Void
@@ -464,6 +893,7 @@ private struct OverlaysView: View {
     let onAccount: () -> Void
     let onSettings: () -> Void
     let onLogOut: () -> Void
+    let onFooterHeightChange: (CGFloat) -> Void
 
     private var hintText: String {
         if selectedFeature == .flatten && flattenRelocationActive {
@@ -542,27 +972,74 @@ private struct OverlaysView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
 
-                    // Top status / hint
-                    Text(hintText)
-                        .font(.subheadline)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(.thinMaterial)
-                        .overlay(
-                            Capsule()
-                                .fill(Color.black.opacity(0.25))
-                        )
-                        .clipShape(Capsule())
-                        .padding(.top, 4)
+                    if let savedMessage = photoSavedBannerMessage {
+                        TopDownNoticeBanner(message: savedMessage)
+                            .padding(.top, 4)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    } else {
+                        Text(hintText)
+                            .font(.subheadline)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(.thinMaterial)
+                            .overlay(
+                                Capsule()
+                                    .fill(Color.black.opacity(0.25))
+                            )
+                            .clipShape(Capsule())
+                            .padding(.top, 4)
 
-                    OverlayGuideBanner(text: secondaryGuideText, kind: secondaryGuideKind)
+                        OverlayGuideBanner(text: secondaryGuideText, kind: secondaryGuideKind)
+                    }
 
                     Spacer()
 
                     VStack(spacing: 10) {
-                        if selectedFeature == .flatten && flattenSegmentCount >= 3 && !flattenRelocationActive {
-                            VStack(spacing: 8) {
+                        // if selectedFeature == .flatten && flattenSegmentCount >= 3 && !flattenRelocationActive {
+                        //     VStack(spacing: 8) {
+                        //         Button {
+                        //             onStartScan()
+                        //         } label: {
+                        //             Label("Start Scan", systemImage: "viewfinder")
+                        //                 .font(.headline.weight(.semibold))
+                        //                 .frame(maxWidth: .infinity)
+                        //                 .padding(.vertical, 12)
+                        //         }
+                        //         .buttonStyle(.plain)
+                        //         .foregroundColor(.white)
+                        //         .background(
+                        //             flattenScanCornersReady
+                        //                 ? Color(red: 0.38, green: 0.58, blue: 0.92)
+                        //                 : Color.white.opacity(0.22)
+                        //         )
+                        //         .clipShape(RoundedRectangle(cornerRadius: 16))
+                        //         .overlay(
+                        //             RoundedRectangle(cornerRadius: 16)
+                        //                 .strokeBorder(Color.white.opacity(flattenScanCornersReady ? 0 : 0.35), lineWidth: 1)
+                        //         )
+                        //         .disabled(!flattenScanCornersReady)
+                        //         .opacity(flattenScanCornersReady ? 1 : 0.72)
+                        //     }
+                        //     .padding(.horizontal, 16)
+                        // }
+
+                        HStack(alignment: .center) {                                                  
+                            Spacer()
+
+                            Button {
+                                onPlaceMark()
+                            } label: {
+                                Image(systemName: "plus.circle.fill")
+                                    .font(.system(size: 80, weight: .regular))
+                                    .frame(width: 100, height: 100)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!canPlaceMark)
+                            .opacity(canPlaceMark ? 1 : 0.45)
+
+                            if selectedFeature == .flatten && flattenSegmentCount >= 3 && !flattenRelocationActive {
+                                Spacer()
                                 Button {
                                     onStartScan()
                                 } label: {
@@ -586,26 +1063,9 @@ private struct OverlaysView: View {
                                 .disabled(!flattenScanCornersReady)
                                 .opacity(flattenScanCornersReady ? 1 : 0.72)
                             }
-                            .padding(.horizontal, 16)
-                        }
-
-                        HStack(alignment: .center) {
-                            Spacer()
-
-                            Button {
-                                onPlaceMark()
-                            } label: {
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 80, weight: .regular))
-                                    .frame(width: 100, height: 100)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(!canPlaceMark)
-                            .opacity(canPlaceMark ? 1 : 0.45)
 
                             Spacer()
-                        }
-                        .overlay(alignment: .trailing) {
+
                             Button {
                                 onScreenshot()
                             } label: {
@@ -617,7 +1077,8 @@ private struct OverlaysView: View {
                             .padding(10)
                             .background(.thinMaterial)
                             .cornerRadius(20)
-                            .padding(.trailing, 16)
+
+                            Spacer()
                         }
 
                         ARApplicationFooter(
@@ -628,6 +1089,12 @@ private struct OverlaysView: View {
                             onSettings: onSettings,
                             onLogOut: onLogOut
                         )
+                        .background(
+                            GeometryReader { proxy in
+                                Color.clear
+                                    .preference(key: ARFooterHeightPreferenceKey.self, value: proxy.size.height)
+                            }
+                        )
                         .padding(.horizontal, 16)
                     }
                     .padding(.bottom, 12)
@@ -635,11 +1102,21 @@ private struct OverlaysView: View {
             }
         }
         .foregroundColor(.white)
+        .animation(.spring(response: 0.38, dampingFraction: 0.86), value: photoSavedBannerMessage)
+        .onPreferenceChange(ARFooterHeightPreferenceKey.self, perform: onFooterHeightChange)
     }
 
     private var canPlaceMark: Bool {
         guard hasValidTarget else { return false }
         return true
+    }
+}
+
+private struct ARFooterHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 

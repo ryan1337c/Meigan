@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		D330DEB92F758C00005A55CF /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = D330DEB82F758C00005A55CF /* Supabase */; };
+		D330DF7D2FAAD47A005A55CF /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D330DF7C2FAAD47A005A55CF /* Accelerate.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -28,6 +29,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D330DF7C2FAAD47A005A55CF /* Accelerate.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Accelerate.framework; path = System/Library/Frameworks/Accelerate.framework; sourceTree = SDKROOT; };
 		D3D997DA2F479DBA00308C55 /* Meigan.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Meigan.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D3D997E72F479DBB00308C55 /* MeiganTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeiganTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D3D997F12F479DBB00308C55 /* MeiganUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeiganUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -70,6 +72,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				D330DEB92F758C00005A55CF /* Supabase in Frameworks */,
+				D330DF7D2FAAD47A005A55CF /* Accelerate.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -93,6 +96,7 @@
 		D330DEB72F758C00005A55CF /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				D330DF7C2FAAD47A005A55CF /* Accelerate.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";

@@ -25,8 +25,29 @@ private enum MeasurementLabelStyle {
     static let pillHeight: Float = 0.028
     static let textFrame = CGRect(x: 0, y: 0, width: 0.074, height: 0.02)
     static let fontMeters: CGFloat = 0.016
+    /// Prefer Helvetica (stable PostScript name) for extruded text; fall back to SF UI if needed.
+    private static let meshFontPostScriptCandidates = ["Helvetica", ".SFUI-Regular"]
     /// Shift readout slightly toward the camera so it sorts in front of the dashed line (avoids z‑fight / line cutting the pill).
     static let labelTowardCameraBiasMeters: Float = 0.007
+
+    /// Font for `MeshResource.generateText` — PostScript names only (avoids CoreText display-name notes).
+    static func meshFontForGenerateText() -> MeshResource.Font {
+        for psName in meshFontPostScriptCandidates {
+            if let font = MeshResource.Font(name: psName, size: fontMeters) {
+                return font
+            }
+        }
+        return MeshResource.Font.systemFont(ofSize: fontMeters)
+    }
+
+    /// Strips characters that tend to pull in fallback fonts during `generateText` shaping.
+    /// `fileprivate` so `Coordinator` call sites in this file can use it (`private` would limit access to this enum only).
+    fileprivate static func meshDisplayText(_ raw: String) -> String {
+        raw
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+            .replacingOccurrences(of: "\u{2014}", with: "-")
+            .replacingOccurrences(of: "\u{2013}", with: "-")
+    }
     /// At this camera–label distance, world scale is 1.0 (matches previous “natural” size at arm’s length).
     static let labelReferenceCameraDistanceMeters: Float = 0.65
     static let labelDistanceScaleMin: Float = 0.3
@@ -97,6 +118,8 @@ struct ARSceneView: UIViewRepresentable {
     @Binding var screenshotPreviewImage: UIImage?
     @Binding var flattenScanToken: Int
     @Binding var flattenScanPreviewImage: UIImage?
+    @Binding var flattenScanResultImage: UIImage?
+    @Binding var flattenShapeFindings: [FlattenShapeFinding]
     @Binding var isFlattenScanActive: Bool
     @Binding var flattenScanSigmas: [Float]
     @Binding var flattenScanCornersReady: Bool
@@ -105,6 +128,7 @@ struct ARSceneView: UIViewRepresentable {
     @Binding var placementWarningToken: Int
     @Binding var placementBannerKind: PlacementBannerKind
     @Binding var flattenRelocationActive: Bool
+    @Binding var flattenFooterHeight: CGFloat
 
     class Coordinator: NSObject, ARCoachingOverlayViewDelegate, ARSessionDelegate {
         @Binding var isCoachingActive: Bool
@@ -121,6 +145,8 @@ struct ARSceneView: UIViewRepresentable {
         @Binding var measurementUnitRaw: String
         @Binding var screenshotPreviewImage: UIImage?
         @Binding var flattenScanPreviewImage: UIImage?
+        @Binding var flattenScanResultImage: UIImage?
+        @Binding var flattenShapeFindings: [FlattenShapeFinding]
         @Binding var isFlattenScanActive: Bool
         @Binding var flattenScanSigmas: [Float]
         @Binding var flattenScanCornersReady: Bool
@@ -129,6 +155,7 @@ struct ARSceneView: UIViewRepresentable {
         @Binding var placementWarningToken: Int
         @Binding var placementBannerKind: PlacementBannerKind
         @Binding var flattenRelocationActive: Bool
+        var flattenFooterHeight: CGFloat = 0
 
         private var ringAnchor: AnchorEntity?
         private var ringEntity: ModelEntity?
@@ -199,6 +226,7 @@ struct ARSceneView: UIViewRepresentable {
         private var lastProcessedFlattenScanToken: Int = 0
         private var lastSyncedMeasurementUnitRaw: String = ""
         private var lastSyncedMeasurementModeRaw: String = ARFooterFeature.ruler.rawValue
+        private var lastSyncedFlattenFooterHeight: CGFloat = 0
 
         // Smoothing state (nil = snap to first hit)
         private var smoothPosition: SIMD3<Float>?
@@ -221,6 +249,28 @@ struct ARSceneView: UIViewRepresentable {
 
         private var lastFlattenScanCornersReady = false
 
+        /// Bumped to drop in-flight flatten scan completion work (e.g. user cancelled while processing).
+        var flattenScanInvalidateGeneration: UInt64 = 0
+
+        /// Captured `isEnabled` for flatten dual-snapshot capture (preview vs raw).
+        private struct FlattenScanSnapshotDecorationRestore {
+            let ring: Bool
+            let hasValidTarget: Bool
+            let committedLines: Bool
+            let committedFill: Bool
+            let segmentLabels: Bool
+            let draftLabel: Bool
+            let flattenFillPreview: Bool
+            let previewLines: Bool
+            let vertexMarkers: Bool
+            let lineMidHoverDot: Bool
+        }
+
+        private var flattenScanSnapshotDecorationRestore: FlattenScanSnapshotDecorationRestore?
+
+        /// While true, the per-frame loop must not re-enable the ring between hiding it and `ARView.snapshot` completing.
+        private var isFlattenScanSnapshotCaptureActive = false
+
         init(
             isCoachingActive: Binding<Bool>,
             isRelocalizing: Binding<Bool>,
@@ -232,6 +282,8 @@ struct ARSceneView: UIViewRepresentable {
             measurementUnitRaw: Binding<String>,
             screenshotPreviewImage: Binding<UIImage?>,
             flattenScanPreviewImage: Binding<UIImage?>,
+            flattenScanResultImage: Binding<UIImage?>,
+            flattenShapeFindings: Binding<[FlattenShapeFinding]>,
             isFlattenScanActive: Binding<Bool>,
             flattenScanSigmas: Binding<[Float]>,
             flattenScanCornersReady: Binding<Bool>,
@@ -251,6 +303,8 @@ struct ARSceneView: UIViewRepresentable {
             _measurementUnitRaw = measurementUnitRaw
             _screenshotPreviewImage = screenshotPreviewImage
             _flattenScanPreviewImage = flattenScanPreviewImage
+            _flattenScanResultImage = flattenScanResultImage
+            _flattenShapeFindings = flattenShapeFindings
             _isFlattenScanActive = isFlattenScanActive
             _flattenScanSigmas = flattenScanSigmas
             _flattenScanCornersReady = flattenScanCornersReady
@@ -403,10 +457,10 @@ struct ARSceneView: UIViewRepresentable {
             let pill = ModelEntity(mesh: pillMesh, materials: [MeasurementLabelStyle.borderedPillMaterial()])
             pill.orientation = simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(1, 0, 0))
             pill.position = SIMD3<Float>(0, 0, -0.0006)
-            let font = MeshResource.Font.systemFont(ofSize: MeasurementLabelStyle.fontMeters)
+            let font = MeasurementLabelStyle.meshFontForGenerateText()
             let frame = MeasurementLabelStyle.textFrame
             let mesh = MeshResource.generateText(
-                displayText,
+                MeasurementLabelStyle.meshDisplayText(displayText),
                 extrusionDepth: 0.0005,
                 font: font,
                 containerFrame: frame,
@@ -416,7 +470,7 @@ struct ARSceneView: UIViewRepresentable {
             var mat = UnlitMaterial()
             mat.color = .init(tint: UIColor.black)
             let textEnt = ModelEntity(mesh: mesh, materials: [mat])
-            textEnt.position = .zero
+            textEnt.position = SIMD3<Float>(repeating: 0)
             root.addChild(pill)
             root.addChild(textEnt)
             let box = textEnt.visualBounds(relativeTo: root)
@@ -582,6 +636,12 @@ struct ARSceneView: UIViewRepresentable {
                 // Hide the ring if coaching is active
                 if self.isCoachingActive {
                     self.hideRing()
+                    return
+                }
+
+                if self.isFlattenScanSnapshotCaptureActive || self.isFlattenScanActive {
+                    self.ringEntity?.isEnabled = false
+                    self.hasValidTarget = false
                     return
                 }
 
@@ -879,17 +939,18 @@ struct ARSceneView: UIViewRepresentable {
             if draftSegmentStart != nil, let start = draftSegmentStart, let b = latestReticleWorldPosition {
                 let len = simd_distance(b, start)
                 guard len > 1e-5 else { return }
-                let text = MeasurementUnit.formatDistance(meters: len, unit: unit)
+                let readout = MeasurementUnit.formatDistance(meters: len, unit: unit)
+                let meshText = MeasurementUnit.formatDistanceForMesh3D(meters: len, unit: unit)
                 lastPreviewReadoutString = ""
-                rebuildDraftPreviewLabelMesh(text: text)
-                lastPreviewReadoutString = text
+                rebuildDraftPreviewLabelMesh(text: meshText)
+                lastPreviewReadoutString = readout
                 DispatchQueue.main.async {
-                    self.measurementReadout = text
+                    self.measurementReadout = readout
                 }
             } else if draftSegmentStart == nil, let last = committedSegments.last, last.lengthMeters > 1e-5 {
-                let text = MeasurementUnit.formatDistance(meters: last.lengthMeters, unit: unit)
+                let readout = MeasurementUnit.formatDistance(meters: last.lengthMeters, unit: unit)
                 DispatchQueue.main.async {
-                    self.measurementReadout = text
+                    self.measurementReadout = readout
                 }
             }
         }
@@ -898,6 +959,109 @@ struct ARSceneView: UIViewRepresentable {
             guard raw != lastSyncedMeasurementModeRaw else { return }
             lastSyncedMeasurementModeRaw = raw
             clearAllMeasurements()
+        }
+
+        func syncFlattenFooterHeightFromSwiftUI(_ height: CGFloat) {
+            let clamped = max(0, height)
+            guard abs(clamped - lastSyncedFlattenFooterHeight) > 0.5 else { return }
+            lastSyncedFlattenFooterHeight = clamped
+            flattenFooterHeight = clamped
+        }
+
+        func beginFlattenScanSnapshotDecorations() {
+            if flattenScanSnapshotDecorationRestore != nil {
+                restoreFlattenScanSnapshotDecorations()
+            }
+            isFlattenScanSnapshotCaptureActive = true
+            flattenScanSnapshotDecorationRestore = FlattenScanSnapshotDecorationRestore(
+                ring: ringEntity?.isEnabled ?? false,
+                hasValidTarget: hasValidTarget,
+                committedLines: committedLinesContainer?.isEnabled ?? false,
+                committedFill: committedFillContainer?.isEnabled ?? false,
+                segmentLabels: committedSegmentLabelsContainer?.isEnabled ?? false,
+                draftLabel: draftPreviewLabelRoot?.isEnabled ?? false,
+                flattenFillPreview: flattenFillPreviewContainer?.isEnabled ?? false,
+                previewLines: previewLinesContainer?.isEnabled ?? false,
+                vertexMarkers: vertexMarkersContainer?.isEnabled ?? false,
+                lineMidHoverDot: lineMidHoverDotEntity?.isEnabled ?? false
+            )
+        }
+
+        /// Preview still: committed teal fill + dashed edge lines only (no labels, markers, ring, draft UI).
+        func applyFlattenScanPreviewSnapshotVisibility() {
+            ringEntity?.isEnabled = false
+            hasValidTarget = false
+            committedSegmentLabelsContainer?.isEnabled = false
+            draftPreviewLabelRoot?.isEnabled = false
+            lineMidHoverDotEntity?.isEnabled = false
+            vertexMarkersContainer?.isEnabled = false
+            flattenFillPreviewContainer?.isEnabled = false
+            previewLinesContainer?.isEnabled = false
+            committedLinesContainer?.isEnabled = true
+            committedFillContainer?.isEnabled = true
+        }
+
+        /// Final warp / export: camera-only (no measurement overlays).
+        func applyFlattenScanRawSnapshotVisibility() {
+            ringEntity?.isEnabled = false
+            hasValidTarget = false
+            committedLinesContainer?.isEnabled = false
+            committedFillContainer?.isEnabled = false
+            committedSegmentLabelsContainer?.isEnabled = false
+            draftPreviewLabelRoot?.isEnabled = false
+            flattenFillPreviewContainer?.isEnabled = false
+            previewLinesContainer?.isEnabled = false
+            vertexMarkersContainer?.isEnabled = false
+            lineMidHoverDotEntity?.isEnabled = false
+        }
+
+        func restoreFlattenScanSnapshotDecorations() {
+            isFlattenScanSnapshotCaptureActive = false
+            guard let snapshot = flattenScanSnapshotDecorationRestore else { return }
+            flattenScanSnapshotDecorationRestore = nil
+            ringEntity?.isEnabled = snapshot.ring
+            hasValidTarget = snapshot.hasValidTarget
+            committedLinesContainer?.isEnabled = snapshot.committedLines
+            committedFillContainer?.isEnabled = snapshot.committedFill
+            committedSegmentLabelsContainer?.isEnabled = snapshot.segmentLabels
+            draftPreviewLabelRoot?.isEnabled = snapshot.draftLabel
+            flattenFillPreviewContainer?.isEnabled = snapshot.flattenFillPreview
+            previewLinesContainer?.isEnabled = snapshot.previewLines
+            vertexMarkersContainer?.isEnabled = snapshot.vertexMarkers
+            lineMidHoverDotEntity?.isEnabled = snapshot.lineMidHoverDot
+        }
+
+        /// Clears flatten quad/lines/labels from the live scene after a **successful** scan (not used on cancel).
+        func clearFlattenLiveMeasurementAfterSuccessfulScan() {
+            committedSegments.removeAll()
+            draftSegmentStart = nil
+            flattenAdjustingPointIndex = nil
+            lastFlattenScanCornersReady = false
+            committedLinesContainer?.isEnabled = false
+            previewLinesContainer?.isEnabled = false
+            clearEntityChildren(committedLinesContainer)
+            clearEntityChildren(previewLinesContainer)
+            clearEntityChildren(vertexMarkersContainer)
+            clearEntityChildren(committedSegmentLabelsContainer)
+            clearEntityChildren(committedFillContainer)
+            committedFillContainer?.isEnabled = false
+            committedSegmentLabelsContainer?.isEnabled = false
+            draftPreviewLabelRoot?.isEnabled = false
+            draftPreviewLabelRoot?.scale = SIMD3<Float>(repeating: 1)
+            lineMidHoverDotEntity?.isEnabled = false
+            clearEntityChildren(flattenFillPreviewContainer)
+            flattenFillPreviewContainer?.isEnabled = false
+            lastAutolockedPinWorld = nil
+            latestPinAutolockWorld = nil
+            lastPreviewReadoutString = ""
+            hideRing()
+            DispatchQueue.main.async {
+                self.measurementReadout = "—"
+                self.markCount = 0
+                self.flattenSegmentCount = 0
+                self.flattenRelocationActive = false
+                self.flattenScanCornersReady = false
+            }
         }
 
         private func placeMarkAtReticle() {
@@ -920,6 +1084,19 @@ struct ARSceneView: UIViewRepresentable {
         }
 
         private func clearAllMeasurements() {
+            if isFlattenScanActive {
+                flattenScanInvalidateGeneration += 1
+                DispatchQueue.main.async {
+                    self.isFlattenScanActive = false
+                    self.flattenScanPreviewImage = nil
+                    self.flattenScanResultImage = nil
+                    self.flattenScanSigmas = []
+                    self.flattenShapeFindings = []
+                }
+                return
+            }
+
+            flattenScanInvalidateGeneration += 1
             committedSegments.removeAll()
             draftSegmentStart = nil
             flattenAdjustingPointIndex = nil
@@ -948,6 +1125,8 @@ struct ARSceneView: UIViewRepresentable {
                 self.flattenRelocationActive = false
                 self.isFlattenScanActive = false
                 self.flattenScanPreviewImage = nil
+                self.flattenScanResultImage = nil
+                self.flattenShapeFindings = []
                 self.flattenScanSigmas = []
                 self.flattenScanCornersReady = false
             }
@@ -1016,9 +1195,9 @@ struct ARSceneView: UIViewRepresentable {
             for seg in committedSegments {
                 let text: String
                 if seg.lengthMeters > 1e-5 {
-                    text = MeasurementUnit.formatDistance(meters: seg.lengthMeters, unit: unit)
+                    text = MeasurementUnit.formatDistanceForMesh3D(meters: seg.lengthMeters, unit: unit)
                 } else {
-                    text = "—"
+                    text = "-"
                 }
                 container.addChild(Self.makeMeasurementLabelStack(displayText: text))
             }
@@ -1108,12 +1287,12 @@ struct ARSceneView: UIViewRepresentable {
             )
 
             let unit = MeasurementUnit.from(storage: measurementUnitRaw)
-            let text = MeasurementUnit.formatDistance(meters: len, unit: unit)
-            if text != lastPreviewReadoutString {
-                lastPreviewReadoutString = text
-                rebuildDraftPreviewLabelMesh(text: text)
+            let readout = MeasurementUnit.formatDistance(meters: len, unit: unit)
+            if readout != lastPreviewReadoutString {
+                lastPreviewReadoutString = readout
+                rebuildDraftPreviewLabelMesh(text: MeasurementUnit.formatDistanceForMesh3D(meters: len, unit: unit))
                 DispatchQueue.main.async {
-                    self.measurementReadout = text
+                    self.measurementReadout = readout
                 }
             }
 
@@ -1197,10 +1376,10 @@ struct ARSceneView: UIViewRepresentable {
 
         private func rebuildDraftPreviewLabelMesh(text: String) {
             guard let textEntity = draftLabelTextEntity, let parent = textEntity.parent else { return }
-            let font = MeshResource.Font.systemFont(ofSize: MeasurementLabelStyle.fontMeters)
+            let font = MeasurementLabelStyle.meshFontForGenerateText()
             let frame = MeasurementLabelStyle.textFrame
             let mesh = MeshResource.generateText(
-                text,
+                MeasurementLabelStyle.meshDisplayText(text),
                 extrusionDepth: 0.0005,
                 font: font,
                 containerFrame: frame,
@@ -1209,7 +1388,7 @@ struct ARSceneView: UIViewRepresentable {
             )
             var mat = UnlitMaterial()
             mat.color = .init(tint: UIColor.black)
-            textEntity.position = .zero
+            textEntity.position = SIMD3<Float>(repeating: 0)
             textEntity.model = ModelComponent(mesh: mesh, materials: [mat])
             let box = textEntity.visualBounds(relativeTo: parent)
             let span = box.max - box.min
@@ -1479,6 +1658,8 @@ struct ARSceneView: UIViewRepresentable {
             measurementUnitRaw: $measurementUnitRaw,
             screenshotPreviewImage: $screenshotPreviewImage,
             flattenScanPreviewImage: $flattenScanPreviewImage,
+            flattenScanResultImage: $flattenScanResultImage,
+            flattenShapeFindings: $flattenShapeFindings,
             isFlattenScanActive: $isFlattenScanActive,
             flattenScanSigmas: $flattenScanSigmas,
             flattenScanCornersReady: $flattenScanCornersReady,
@@ -1541,6 +1722,7 @@ struct ARSceneView: UIViewRepresentable {
         context.coordinator.syncScreenshotTokenIfNeeded(token: screenshotToken)
         context.coordinator.syncFlattenScanTokenIfNeeded(token: flattenScanToken)
         context.coordinator.syncMeasurementUnitFromSwiftUI(measurementUnitRaw)
+        context.coordinator.syncFlattenFooterHeightFromSwiftUI(flattenFooterHeight)
     }
 
     static func dismantleUIView(_ uiView: ARView, coordinator: Coordinator) {
@@ -1564,6 +1746,8 @@ struct ARSceneView: UIViewRepresentable {
         screenshotPreviewImage: .constant(nil),
         flattenScanToken: .constant(0),
         flattenScanPreviewImage: .constant(nil),
+        flattenScanResultImage: .constant(nil),
+        flattenShapeFindings: .constant([]),
         isFlattenScanActive: .constant(false),
         flattenScanSigmas: .constant([]),
         flattenScanCornersReady: .constant(false),
@@ -1571,6 +1755,7 @@ struct ARSceneView: UIViewRepresentable {
         placementWarningMessage: .constant(""),
         placementWarningToken: .constant(0),
         placementBannerKind: .constant(.alert),
-        flattenRelocationActive: .constant(false)
+        flattenRelocationActive: .constant(false),
+        flattenFooterHeight: .constant(0)
     )
 }
