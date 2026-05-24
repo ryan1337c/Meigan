@@ -129,6 +129,11 @@ struct ARSceneView: UIViewRepresentable {
     @Binding var placementBannerKind: PlacementBannerKind
     @Binding var flattenRelocationActive: Bool
     @Binding var flattenFooterHeight: CGFloat
+    /// Consecutive placement-guide frames before showing a placement hint (read on the RealityKit update thread).
+    let trackingGuideShowThreshold: Int
+    @Binding var activeTrackingReason: ARCamera.TrackingState.Reason?
+    @Binding var trackingGuideMessage: String
+    @Binding var trackingGuideKind: PlacementBannerKind
 
     class Coordinator: NSObject, ARCoachingOverlayViewDelegate, ARSessionDelegate {
         @Binding var isCoachingActive: Bool
@@ -156,6 +161,9 @@ struct ARSceneView: UIViewRepresentable {
         @Binding var placementBannerKind: PlacementBannerKind
         @Binding var flattenRelocationActive: Bool
         var flattenFooterHeight: CGFloat = 0
+        @Binding var activeTrackingReason: ARCamera.TrackingState.Reason?
+        @Binding var trackingGuideMessage: String
+        @Binding var trackingGuideKind: PlacementBannerKind
 
         private var ringAnchor: AnchorEntity?
         private var ringEntity: ModelEntity?
@@ -194,6 +202,8 @@ struct ARSceneView: UIViewRepresentable {
         /// Mirrored from `ARSceneView.updateUIView` every frame. The coordinator’s `@Binding measurementModeRaw`
         /// is captured only once in `makeCoordinator` and can stay stale vs the parent’s custom `Binding` — use this for mode checks.
         var appliedMeasurementModeRaw: String = ARFooterFeature.ruler.rawValue
+        /// Mirrored from the representable each SwiftUI update so the RealityKit update thread never reads `@Binding`s.
+        var appliedTrackingGuideShowThreshold: Int = 6
 
         private var isFlattenMode: Bool {
             appliedMeasurementModeRaw == ARFooterFeature.flatten.rawValue
@@ -242,10 +252,68 @@ struct ARSceneView: UIViewRepresentable {
         private let missThreshold = 12
         private let showThreshold = 2
         private let normalSmoothAlpha: Float = 0.14
+        private let minReticlePlacementDistanceMeters: Float = 0.15
 
         /// Avoid hiding reticle on single-frame tracking flicker.
         private var consecutiveBadTrackingFrames = 0
         private let badTrackingThreshold = 6
+
+        // Lighting guidance
+        private var smoothedAmbientIntensity: CGFloat? // Smooth ambient intensity for lighting guidance
+        private let ambientIntensityEMAAlpha: CGFloat = 0.2 // Used for EMA this it our alpha value
+        private let tooDarkThreshold: CGFloat = 520 // 200 - 300 for dim rooms 
+        private let tooDarkConsecutiveFramesThreshold = 12
+        private var tooDarkConsecutiveFrames = 0
+        private var isTooDark = false
+        private var lightingGuidePromotedIssue: ResolvedTrackingGuideIssue = .none
+
+        private enum PlacementGuideIssue: Equatable {
+            case none
+            case tooClose
+            case findNearbySurface
+        }
+
+        private enum ARKitGuideIssue: Equatable {
+            case none
+            case excessiveMotion
+            case findNearbySurface
+        }
+
+        private enum ResolvedTrackingGuideIssue: Equatable {
+            case none
+            case tooClose
+            case excessiveMotion
+            case findNearbySurface
+            case tooDark
+        }
+
+        /// Placement guidance debounce state (`startUpdateLoop` / `.normal` path).
+        private var placementGuideDebounceIssue: PlacementGuideIssue = .none
+        private var placementGuideDebounceFrameCount: Int = 0
+        private var placementGuidePromotedIssue: PlacementGuideIssue = .none
+
+        /// ARKit guidance debounce state (`.limited` / `.notAvailable` path).
+        private var arKitInsufficientFeaturesFrameCount: Int = 0
+        private var arKitNoneFrameCount: Int = 0
+        private let arKitInsufficientFeaturesShowThreshold = 8
+        private let arKitClearShowThreshold = 1
+
+        private var arKitGuidePromotedIssue: ARKitGuideIssue = .none
+
+
+        // Custom motion detection (replace ARKit's excessive motion):
+        private var lastCameraTransform: simd_float4x4?
+        private let customExcessiveMotionThreshold: Float = 0.01  // meters per frame
+        private var customExcessiveMotionFrameCount = 0
+        private let customExcessiveMotionShowThreshold = 2
+        private var customExcessiveMotionActive = false
+        private var customMotionPromotedIssue: ResolvedTrackingGuideIssue = .none // Add new property for custom motion (separate from ARKit's state)
+
+        /// Issue currently shown in the tracking guide banner.
+        private var displayedTrackingGuideIssue: ResolvedTrackingGuideIssue = .none
+        private var trackingGuideDisplayedAt: Date?
+        private static let trackingGuideMinimumDisplayDuration: TimeInterval = 2
+        private var trackingGuideTransitionWorkItem: DispatchWorkItem?
 
         private var lastFlattenScanCornersReady = false
 
@@ -291,7 +359,10 @@ struct ARSceneView: UIViewRepresentable {
             placementWarningMessage: Binding<String>,
             placementWarningToken: Binding<Int>,
             placementBannerKind: Binding<PlacementBannerKind>,
-            flattenRelocationActive: Binding<Bool>
+            flattenRelocationActive: Binding<Bool>,
+            activeTrackingReason: Binding<ARCamera.TrackingState.Reason?>,
+            trackingGuideMessage: Binding<String>,
+            trackingGuideKind: Binding<PlacementBannerKind>
         ) {
             _isCoachingActive = isCoachingActive
             _isRelocalizing = isRelocalizing
@@ -313,10 +384,14 @@ struct ARSceneView: UIViewRepresentable {
             _placementWarningToken = placementWarningToken
             _placementBannerKind = placementBannerKind
             _flattenRelocationActive = flattenRelocationActive
+            _activeTrackingReason = activeTrackingReason
+            _trackingGuideMessage = trackingGuideMessage
+            _trackingGuideKind = trackingGuideKind
         }
 
         deinit {
             updateSubscription?.cancel()
+            cancelTrackingGuideTransition()
         }
 
         /// Stops the per-frame loop, pauses ARKit, and detaches delegates so navigating away from the
@@ -324,6 +399,7 @@ struct ARSceneView: UIViewRepresentable {
         func teardownSession() {
             updateSubscription?.cancel()
             updateSubscription = nil
+            cancelTrackingGuideTransition()
 
             if let arView {
                 arView.session.delegate = nil
@@ -624,24 +700,91 @@ struct ARSceneView: UIViewRepresentable {
                     }
                     return
                 }
-                if currentFrame.camera.trackingState != .normal {
-                    self.consecutiveBadTrackingFrames += 1
-                    if self.consecutiveBadTrackingFrames >= self.badTrackingThreshold {
-                        self.hideRing()
+
+                // Update lighting guidance
+                self.updateSmoothedAmbientIntensity(currentFrame.lightEstimate)
+                self.updateTooDarkLightingDebounced()
+
+                // Custom motion detection (replaces ARKit's excessive motion)
+                let currentTransform = currentFrame.camera.transform
+                let currentPos = SIMD3<Float>(
+                    currentTransform.columns.3.x,
+                    currentTransform.columns.3.y,
+                    currentTransform.columns.3.z
+                )
+                
+                if let lastTransform = self.lastCameraTransform {
+                    let lastPos = SIMD3<Float>(
+                        lastTransform.columns.3.x,
+                        lastTransform.columns.3.y,
+                        lastTransform.columns.3.z
+                    )
+                    let displacement = simd_distance(currentPos, lastPos)
+                    
+                    if displacement > self.customExcessiveMotionThreshold {
+                        self.customExcessiveMotionFrameCount += 1
+                        if self.customExcessiveMotionFrameCount >= self.customExcessiveMotionShowThreshold {
+                            if !self.customExcessiveMotionActive {
+                                self.customExcessiveMotionActive = true
+                                self.publishCustomExcessiveMotion(true)
+                            }
+                        }
+                    } else {
+                        // Decay counter
+                        if self.customExcessiveMotionFrameCount > 0 {
+                            self.customExcessiveMotionFrameCount -= 1
+                        }
+                        if self.customExcessiveMotionFrameCount == 0 && self.customExcessiveMotionActive {
+                            self.customExcessiveMotionActive = false
+                            self.publishCustomExcessiveMotion(false)
+                        }
                     }
-                    return
                 }
-                self.consecutiveBadTrackingFrames = 0
+                self.lastCameraTransform = currentTransform
+
+                switch currentFrame.camera.trackingState {
+                    case .normal:
+                        updateARKitTrackingGuide(nil)
+                        consecutiveBadTrackingFrames = 0
+                    
+                    case .limited(let reason):
+                        consecutiveBadTrackingFrames += 1
+                        updateARKitTrackingGuide(reason == .insufficientFeatures ? reason : nil)
+                        updatePlacementGuide(.none)
+                        if consecutiveBadTrackingFrames >= badTrackingThreshold {
+                            hideRing()
+                        }
+                        return
+                    
+                    case .notAvailable:
+                        consecutiveBadTrackingFrames += 1
+                        updateARKitTrackingGuide(nil)
+                        updatePlacementGuide(.none)
+                        if consecutiveBadTrackingFrames >= badTrackingThreshold {
+                            hideRing()
+                        }
+                        return
+                }
+                // if currentFrame.camera.trackingState != .normal {
+                //     self.consecutiveBadTrackingFrames += 1
+                //     if self.consecutiveBadTrackingFrames >= self.badTrackingThreshold {
+                //         self.hideRing()
+                //     }
+                //     return
+                // }
+                // self.consecutiveBadTrackingFrames = 0
 
                 // Hide the ring if coaching is active
                 if self.isCoachingActive {
+                    self.updatePlacementGuide(.none)
                     self.hideRing()
                     return
                 }
 
                 if self.isFlattenScanSnapshotCaptureActive || self.isFlattenScanActive {
                     self.ringEntity?.isEnabled = false
-                    self.hasValidTarget = false
+                    self.updatePlacementGuide(.none)
+                    DispatchQueue.main.async { self.hasValidTarget = false }
                     return
                 }
 
@@ -686,29 +829,59 @@ struct ARSceneView: UIViewRepresentable {
                     screenCenter: center
                 )
 
-                let targetPos: SIMD3<Float>
-                // When snapping to an endpoint/mid off the current raycast plane, orient the ring toward the camera.
-                let useCameraFacingNormal: Bool
-                if let pin = pinLockWorld {
-                    targetPos = pin
-                    useCameraFacingNormal = true
-                } else if let h = hit {
-                    let hitTransform = h.worldTransform
-                    targetPos = SIMD3<Float>(hitTransform.columns.3.x, hitTransform.columns.3.y, hitTransform.columns.3.z)
-                    useCameraFacingNormal = false
-                } else {
-                    self.updatePinAutolockHaptics(pinWorld: nil)
-                    self.latestPinAutolockWorld = nil
-                    registerMiss()
-                    return
+                enum AimClassification {
+                    case tooClose
+                    case noSurface
+                    case valid(targetPos: SIMD3<Float>, useCameraFacingNormal: Bool)
                 }
 
-                let distance = simd_distance(targetPos, camPos)
-                if distance > 3.0 {
+                let aimClassification: AimClassification
+                if let pin = pinLockWorld {
+                    let distance = simd_distance(pin, camPos)
+                    if distance < self.minReticlePlacementDistanceMeters {
+                        aimClassification = .tooClose
+                    } else if distance > 3.0 {
+                        aimClassification = .noSurface
+                    } else {
+                        // When snapping to an endpoint/mid off the current raycast plane, orient the ring toward the camera.
+                        aimClassification = .valid(targetPos: pin, useCameraFacingNormal: true)
+                    }
+                } else if let h = hit {
+                    let hitTransform = h.worldTransform
+                    let hitPos = SIMD3<Float>(hitTransform.columns.3.x, hitTransform.columns.3.y, hitTransform.columns.3.z)
+                    let distance = simd_distance(hitPos, camPos)
+                    if distance < self.minReticlePlacementDistanceMeters {
+                        aimClassification = .tooClose
+                    } else if distance > 3.0 {
+                        aimClassification = .noSurface
+                    } else {
+                        aimClassification = .valid(targetPos: hitPos, useCameraFacingNormal: false)
+                    }
+                } else {
+                    aimClassification = .noSurface
+                }
+
+                let targetPos: SIMD3<Float>
+                let useCameraFacingNormal: Bool
+                switch aimClassification {
+                case .tooClose:
+                    self.updatePlacementGuide(.tooClose)
+                    self.updatePinAutolockHaptics(pinWorld: nil)
+                    self.latestPinAutolockWorld = nil
+                    // Too-close is promoted guidance: hide immediately so crosshair/+ reflect invalid aim
+                    // without waiting for missThreshold debounce.
+                    self.hideRing()
+                    return
+                case .noSurface:
+                    self.updatePlacementGuide(.findNearbySurface)
                     self.updatePinAutolockHaptics(pinWorld: nil)
                     self.latestPinAutolockWorld = nil
                     registerMiss()
                     return
+                case .valid(let classifiedPos, let classifiedUseCameraFacingNormal):
+                    self.updatePlacementGuide(.none)
+                    targetPos = classifiedPos
+                    useCameraFacingNormal = classifiedUseCameraFacingNormal
                 }
 
                 self.updatePinAutolockHaptics(pinWorld: pinLockWorld)
@@ -716,6 +889,11 @@ struct ARSceneView: UIViewRepresentable {
 
                 // Valid aim (surface raycast and/or line pinpoint autolock)
                 self.consecutiveMisses = 0
+                if self.displayedTrackingGuideIssue != .none {
+                    self.hideRing()
+                    DispatchQueue.main.async { self.hasValidTarget = false }
+                    return
+                }
                 let ringWasVisible = self.ringEntity?.isEnabled == true
                 if !ringWasVisible {
                     self.consecutiveHits += 1
@@ -800,6 +978,218 @@ struct ARSceneView: UIViewRepresentable {
                 )
 
                 DispatchQueue.main.async { self.hasValidTarget = true }
+            }
+        }
+
+        /// Debounce placement issues locally, then re-resolve global tracking guide priority.
+        private func updatePlacementGuide(_ issue: PlacementGuideIssue) {
+            if issue == placementGuideDebounceIssue {
+                placementGuideDebounceFrameCount += 1
+            } else {
+                placementGuideDebounceIssue = issue
+                placementGuideDebounceFrameCount = 1
+            }
+
+            let threshold = max(1, appliedTrackingGuideShowThreshold)
+            guard placementGuideDebounceFrameCount >= threshold else { return }
+            guard placementGuidePromotedIssue != issue else { return }
+            placementGuidePromotedIssue = issue
+            publishMergedTrackingGuideIfNeeded()
+        }
+
+        // MARK: - Simplified ARKit tracking (no more excessive motion)
+        private func updateARKitTrackingGuide(_ reason: ARCamera.TrackingState.Reason?) {
+            let issue: ARKitGuideIssue
+            switch reason {
+            case .insufficientFeatures:
+                issue = .findNearbySurface
+            default:
+                issue = .none
+            }
+
+            let threshold: Int
+            let frameCount: Int
+            switch issue {
+            case .findNearbySurface:
+                arKitInsufficientFeaturesFrameCount += 1
+                arKitNoneFrameCount = 0
+                threshold = arKitInsufficientFeaturesShowThreshold
+                frameCount = arKitInsufficientFeaturesFrameCount
+            case .none:
+                arKitNoneFrameCount += 1
+                arKitInsufficientFeaturesFrameCount = 0
+                threshold = arKitClearShowThreshold
+                frameCount = arKitNoneFrameCount
+            case .excessiveMotion:
+                // No longer handled here - using custom detection
+                return
+            }
+
+            guard frameCount >= threshold else { return }
+            guard arKitGuidePromotedIssue != issue else { return }
+            
+            arKitGuidePromotedIssue = issue
+            publishMergedTrackingGuideIfNeeded()
+        }
+
+        // MARK - Lighting guidance
+        private func updateSmoothedAmbientIntensity(_ lightEstimate: ARLightEstimate?) {
+            guard let lightEstimate else { return }
+            let newValue = lightEstimate.ambientIntensity
+            if let previous = smoothedAmbientIntensity {
+                smoothedAmbientIntensity = 
+                    ambientIntensityEMAAlpha * newValue + (1 - ambientIntensityEMAAlpha) * previous
+            } else {
+                smoothedAmbientIntensity = newValue
+            }
+        }
+
+        private func updateTooDarkLightingDebounced() {
+            guard let smoothed = smoothedAmbientIntensity else { 
+                // No estimate this frame, clear everything
+                tooDarkConsecutiveFrames = 0
+                isTooDark = false
+                return
+            }
+
+            // If enough consecutive frames are too dark, set the flag
+            if smoothed < tooDarkThreshold {
+                tooDarkConsecutiveFrames += 1
+                guard tooDarkConsecutiveFrames >= tooDarkConsecutiveFramesThreshold else { return }
+                isTooDark = true
+            } 
+            else {
+                tooDarkConsecutiveFrames = 0
+                isTooDark = false
+            }
+            publishLightingGuide()
+        }
+
+        // Update the lighting guidance publisher
+        private func publishLightingGuide() {
+            let newIssue: ResolvedTrackingGuideIssue = isTooDark ? .tooDark : .none
+            guard lightingGuidePromotedIssue != newIssue else { return }
+
+            lightingGuidePromotedIssue = newIssue
+            publishMergedTrackingGuideIfNeeded()
+        }
+
+
+        // Update the custom motion publisher
+        private func publishCustomExcessiveMotion(_ isActive: Bool) {
+            let newIssue: ResolvedTrackingGuideIssue = isActive ? .excessiveMotion : .none
+            guard customMotionPromotedIssue != newIssue else { return }
+            
+            customMotionPromotedIssue = newIssue
+            if isActive {
+                arPlacementLog.notice("Custom excessive motion: ACTIVE")
+            } else {
+                arPlacementLog.notice("Custom excessive motion: CLEARED")
+            }
+            publishMergedTrackingGuideIfNeeded()
+        }
+
+
+        // Update the merge resolution to check BOTH sources
+        private func resolveMergedTrackingGuideIssue() -> ResolvedTrackingGuideIssue {
+            // Priority: tooDark >tooClose > excessiveMotion > findNearbySurface > none
+            
+            if lightingGuidePromotedIssue == .tooDark {
+                return .tooDark
+            }
+
+            if placementGuidePromotedIssue == .tooClose {
+                return .tooClose
+            }
+            
+            // ✅ Check custom motion state separately
+            if customMotionPromotedIssue == .excessiveMotion {
+                return .excessiveMotion
+            }
+            
+            // Now check ARKit's promoted issue (which no longer includes excessive motion)
+            if placementGuidePromotedIssue == .findNearbySurface || arKitGuidePromotedIssue == .findNearbySurface {
+                return .findNearbySurface
+            }
+            
+            return .none
+        }
+
+        /// Single publish point for SwiftUI tracking guide bindings with global priority:
+        /// tooDark > tooClose > excessiveMotion > findNearbySurface.
+        /// Each guide stays visible for at least `trackingGuideMinimumDisplayDuration` and persists
+        /// while the resolved issue is unchanged; transitions wait out the minimum before updating.
+        private func publishMergedTrackingGuideIfNeeded() {
+            let resolvedIssue = resolveMergedTrackingGuideIssue()
+            if resolvedIssue == displayedTrackingGuideIssue {
+                cancelTrackingGuideTransition()
+                return
+            }
+            scheduleTrackingGuideTransition()
+        }
+
+        private func cancelTrackingGuideTransition() {
+            trackingGuideTransitionWorkItem?.cancel()
+            trackingGuideTransitionWorkItem = nil
+        }
+
+        private func scheduleTrackingGuideTransition() {
+            cancelTrackingGuideTransition()
+
+            if displayedTrackingGuideIssue == .none {
+                commitTrackingGuideDisplay(resolveMergedTrackingGuideIssue())
+                return
+            }
+
+            let elapsed = trackingGuideDisplayedAt.map { Date().timeIntervalSince($0) }
+                ?? Self.trackingGuideMinimumDisplayDuration
+            let delay = max(0, Self.trackingGuideMinimumDisplayDuration - elapsed)
+
+            if delay <= 0 {
+                commitTrackingGuideDisplay(resolveMergedTrackingGuideIssue())
+                return
+            }
+
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.trackingGuideTransitionWorkItem = nil
+                let latestIssue = self.resolveMergedTrackingGuideIssue()
+                guard latestIssue != self.displayedTrackingGuideIssue else { return }
+                self.commitTrackingGuideDisplay(latestIssue)
+            }
+            trackingGuideTransitionWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        }
+
+        private func commitTrackingGuideDisplay(_ issue: ResolvedTrackingGuideIssue) {
+            displayedTrackingGuideIssue = issue
+            trackingGuideDisplayedAt = issue == .none ? nil : Date()
+
+            let guidance = messageAndReason(for: issue)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.activeTrackingReason = guidance.reason
+                self.trackingGuideMessage = guidance.message
+                self.trackingGuideKind = .instruction
+            }
+        }
+
+        private func messageAndReason(for resolvedIssue: ResolvedTrackingGuideIssue) -> (message: String, reason: ARCamera.TrackingState.Reason?) {
+            switch resolvedIssue {
+            case .tooDark:
+                return ("More light is required", nil)
+            case .tooClose:
+                return ("Move farther away", nil)
+            case .excessiveMotion:
+                return ("Slow down", .excessiveMotion)
+            case .findNearbySurface:
+                // Keep reason specific only when ARKit is the sole winner.
+                let reason = (arKitGuidePromotedIssue == .findNearbySurface && placementGuidePromotedIssue != .findNearbySurface)
+                    ? ARCamera.TrackingState.Reason.insufficientFeatures
+                    : nil
+                return ("Find a nearby surface to measure", reason)
+            case .none:
+                return ("", nil)
             }
         }
 
@@ -1065,6 +1455,14 @@ struct ARSceneView: UIViewRepresentable {
         }
 
         private func placeMarkAtReticle() {
+            let resolvedIssue = resolveMergedTrackingGuideIssue()
+            if resolvedIssue != .none {
+                let guidance = messageAndReason(for: resolvedIssue)
+                if !guidance.message.isEmpty {
+                    showPlacementWarning(guidance.message)
+                }
+                return
+            }
             guard let p = latestReticleWorldPosition else {
                 // arPlacementLog.warning("placeMarkAtReticle: ABORT latestReticleWorldPosition is nil (reticle may not have written a frame yet)")
                 return
@@ -1667,7 +2065,10 @@ struct ARSceneView: UIViewRepresentable {
             placementWarningMessage: $placementWarningMessage,
             placementWarningToken: $placementWarningToken,
             placementBannerKind: $placementBannerKind,
-            flattenRelocationActive: $flattenRelocationActive
+            flattenRelocationActive: $flattenRelocationActive,
+            activeTrackingReason: $activeTrackingReason,
+            trackingGuideMessage: $trackingGuideMessage,
+            trackingGuideKind: $trackingGuideKind
         )
     }
 
@@ -1692,6 +2093,7 @@ struct ARSceneView: UIViewRepresentable {
         }
 
         context.coordinator.arView = arView
+        context.coordinator.appliedTrackingGuideShowThreshold = trackingGuideShowThreshold
         context.coordinator.setupRingEntity(in: arView)
         context.coordinator.setupMeasurementEntities(in: arView)
         context.coordinator.startUpdateLoop()
@@ -1717,6 +2119,7 @@ struct ARSceneView: UIViewRepresentable {
         //     "updateUIView: representable placeMarkToken=\(placeMarkToken) clearMarksToken=\(clearMarksToken)"
         // )
         context.coordinator.appliedMeasurementModeRaw = measurementModeRaw
+        context.coordinator.appliedTrackingGuideShowThreshold = trackingGuideShowThreshold
         context.coordinator.syncMeasurementModeFromSwiftUI(measurementModeRaw)
         context.coordinator.syncPlaceAndClearTokensIfNeeded(placeToken: placeMarkToken, clearToken: clearMarksToken)
         context.coordinator.syncScreenshotTokenIfNeeded(token: screenshotToken)
@@ -1756,6 +2159,10 @@ struct ARSceneView: UIViewRepresentable {
         placementWarningToken: .constant(0),
         placementBannerKind: .constant(.alert),
         flattenRelocationActive: .constant(false),
-        flattenFooterHeight: .constant(0)
+        flattenFooterHeight: .constant(0),
+        trackingGuideShowThreshold: 6,
+        activeTrackingReason: .constant(nil),
+        trackingGuideMessage: .constant(""),
+        trackingGuideKind: .constant(.instruction)
     )
 }

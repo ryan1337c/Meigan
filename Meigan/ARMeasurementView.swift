@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import OSLog
 import Photos
+import ARKit
 
 private let arMeasurementUILog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Meigan", category: "ARPlacement")
 
@@ -15,6 +16,7 @@ struct ARMeasurementView: View {
     @EnvironmentObject private var appSession: AppSession
     @EnvironmentObject private var settings: SettingsManager
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dismiss) private var dismiss
 
     @State private var showExplainer = false
     @State private var showAccount = false
@@ -48,9 +50,23 @@ struct ARMeasurementView: View {
     @State private var flattenRelocationActive = false
     @State private var flattenFooterHeight: CGFloat = 0
     @State private var isARSessionActive = true
+    /// Consecutive `.limited` frames before showing the tracking guide (~6 ≈ 100 ms at 60 fps).
+    @State private var trackingGuideShowThreshold = 6
+    @State private var activeTrackingReason: ARCamera.TrackingState.Reason? = nil
+    @State private var trackingGuideMessage: String = ""
+    @State private var trackingGuideKind: PlacementBannerKind = .instruction
 
     // Simple trigger to recreate/reset the AR view
     @State private var arSessionResetID = UUID()
+
+    private var hasPinnedMeasurementPoints: Bool {
+        switch selectedFeature {
+        case .ruler:
+            return markCount > 0
+        case .flatten:
+            return flattenSegmentCount > 0
+        }
+    }
 
     var body: some View {
         Group {
@@ -92,7 +108,11 @@ struct ARMeasurementView: View {
                             placementWarningToken: $placementWarningToken,
                             placementBannerKind: $placementBannerKind,
                             flattenRelocationActive: $flattenRelocationActive,
-                            flattenFooterHeight: $flattenFooterHeight
+                            flattenFooterHeight: $flattenFooterHeight,
+                            trackingGuideShowThreshold: trackingGuideShowThreshold,
+                            activeTrackingReason: $activeTrackingReason,
+                            trackingGuideMessage: $trackingGuideMessage,
+                            trackingGuideKind: $trackingGuideKind
                         )
                         .id(arSessionResetID)
                     } else {
@@ -104,23 +124,28 @@ struct ARMeasurementView: View {
                         isRelocalizing: isRelocalizing,
                         hasValidTarget: hasValidTarget,
                         selectedFeature: selectedFeature,
-                        markCount: markCount,
                         flattenSegmentCount: flattenSegmentCount,
                         flattenRelocationActive: flattenRelocationActive,
                         flattenScanCornersReady: flattenScanCornersReady,
                         placementWarningMessage: placementWarningMessage,
                         placementBannerKind: placementBannerKind,
+                        trackingGuideMessage: trackingGuideMessage,
+                        trackingGuideKind: trackingGuideKind,
                         photoSavedBannerMessage: photoSavedBannerMessage,
                         profileInitial: profileInitial,
+                        hasPinnedPoints: hasPinnedMeasurementPoints,
+                        onBack: { dismiss() },
                         onStartScan: {
                             flattenScanToken += 1
                             arMeasurementUILog.notice("Start Scan tapped")
                         },
                         onSelectFeature: { selectedFeature = $0 },
                         onScreenshot: {
+                            guard trackingGuideMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
                             screenshotToken += 1
                         },
                         onPlaceMark: {
+                            guard trackingGuideMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
                             guard hasValidTarget else {
                                 arMeasurementUILog.warning("onPlaceMark: ignored (hasValidTarget=false)")
                                 return
@@ -213,6 +238,8 @@ struct ARMeasurementView: View {
                         }
                     }
                 }
+                .navigationBarBackButtonHidden(true)
+                .toolbar(.hidden, for: .navigationBar)
             }
         }
         .onAppear {
@@ -847,11 +874,11 @@ private struct OverlayGuideBanner: View {
         Group {
             if !trimmed.isEmpty {
                 Text(trimmed)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.callout.weight(.semibold))
                     .multilineTextAlignment(.center)
                     .foregroundStyle(kind == .instruction ? Color.white.opacity(0.92) : Color.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 9)
                     .background(
                         Capsule()
                             .fill(kind == .instruction ? Color.black.opacity(0.42) : Color.red.opacity(0.88))
@@ -863,10 +890,9 @@ private struct OverlayGuideBanner: View {
                         }
                     }
                     .padding(.top, 4)
-                    .transition(.opacity)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
             }
         }
-        .animation(.easeInOut(duration: 0.25), value: trimmed)
     }
 }
 
@@ -876,15 +902,18 @@ private struct OverlaysView: View {
     let isRelocalizing: Bool
     let hasValidTarget: Bool
     let selectedFeature: ARFooterFeature
-    let markCount: Int
     let flattenSegmentCount: Int
     let flattenRelocationActive: Bool
     let flattenScanCornersReady: Bool
     let placementWarningMessage: String
     let placementBannerKind: PlacementBannerKind
+    let trackingGuideMessage: String
+    let trackingGuideKind: PlacementBannerKind
     /// When set, top guidance is hidden and this banner occupies that slot (e.g. after Save to Photos).
     let photoSavedBannerMessage: String?
     let profileInitial: String
+    let hasPinnedPoints: Bool
+    let onBack: () -> Void
     let onStartScan: () -> Void
     let onSelectFeature: (ARFooterFeature) -> Void
     let onScreenshot: () -> Void
@@ -895,40 +924,30 @@ private struct OverlaysView: View {
     let onLogOut: () -> Void
     let onFooterHeightChange: (CGFloat) -> Void
 
+    private var trackingGuideActive: Bool {
+        !trackingGuideMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private var hintText: String {
         if selectedFeature == .flatten && flattenRelocationActive {
-            return "Move crosshair to the new corner, then tap +"
+            return "Corner selected, move to re adjust"
         }
         if selectedFeature == .flatten {
-            switch flattenSegmentCount {
-            case 0:
-                return "Flatten: aim and tap + for corner 1 of 4"
-            case 1:
-                return "Flatten: aim corner 3, triangle preview follows the crosshair"
-            case 2:
-                return "Flatten: aim corner 4, quad preview follows the crosshair"
-            default:
-                if flattenSegmentCount >= 3 && !flattenRelocationActive {
-                    if !flattenScanCornersReady {
-                        return "Flatten complete — frame all four corners"
-                    }
-                    return "Flatten complete — Start Scan or tap Clear to restart"
-                }
-                return "Flatten complete — tap Clear to restart"
-            }
+            guard flattenSegmentCount < 4 else { return "" }
+            return "Add point (\(flattenSegmentCount + 1)/4)"
         }
-        switch markCount {
-        case 0:
-            return "Aim crosshair, tap + for first point"
-        case 1:
-            return "Aim second point, tap +"
-        default:
-            return "Tap + for a new edge (lock to a pin to extend from it)"
-        }
+        return "Add a point"
+    }
+
+    private var trimmedHintText: String {
+        hintText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Same capsule as coordinator `showPlacementWarning(..., .instruction)` messages (“Corner …”, “All 4 corners…”).
     private var secondaryGuideText: String {
+        if trackingGuideActive {
+            return trackingGuideMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         if !placementWarningMessage.isEmpty {
             return placementWarningMessage
         }
@@ -942,6 +961,9 @@ private struct OverlaysView: View {
     }
 
     private var secondaryGuideKind: PlacementBannerKind {
+        if trackingGuideActive {
+            return trackingGuideKind
+        }
         if !placementWarningMessage.isEmpty {
             return placementBannerKind
         }
@@ -951,46 +973,81 @@ private struct OverlaysView: View {
     private static let scanCornersUnavailableGuide =
         "Start Scan is unavailable until all four corner marks appear inside the frame."
 
+    /// Drives ease-in (no ease-out) when hint / tracking / placement secondary copy changes.
+    private var guidanceAnimationSignature: String {
+        let sec = secondaryGuideText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(trackingGuideActive)|\(trimmedHintText)|\(sec)|\(String(describing: secondaryGuideKind))"
+    }
+
     var body: some View {
         ZStack {
             if !isCoachingActive {
-                if hasValidTarget {
+                if hasValidTarget, !trackingGuideActive {
                     Circle()
                         .fill(Color.white)
                         .frame(width: 6, height: 6)
                 }
 
-                VStack {
+                VStack(spacing: 0) {
                     // Top controls
                     HStack {
-                        Spacer()
-                        Button("Clear") {
-                            onClearMarks()
+                        Button {
+                            onBack()
+                        } label: {
+                            Image(systemName: "arrow.backward")
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .frame(minWidth: 46, minHeight: 46)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                        .accessibilityLabel("Back")
+
+                        Spacer()
+
+                        Button {
+                            onClearMarks()
+                        } label: {
+                            Text("Clear")
+                                .font(.callout.weight(.semibold))
+                                .foregroundStyle(hasPinnedPoints ? Color.white : Color.white.opacity(0.4))
+                                .animation(.easeInOut(duration: 0.28), value: hasPinnedPoints)
+                                .frame(minWidth: 56, minHeight: 46)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
+                    .padding(.bottom, 22)
 
                     if let savedMessage = photoSavedBannerMessage {
                         TopDownNoticeBanner(message: savedMessage)
                             .padding(.top, 4)
                             .transition(.move(edge: .top).combined(with: .opacity))
                     } else {
-                        Text(hintText)
-                            .font(.subheadline)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(.thinMaterial)
-                            .overlay(
-                                Capsule()
-                                    .fill(Color.black.opacity(0.25))
-                            )
-                            .clipShape(Capsule())
-                            .padding(.top, 4)
+                        VStack(spacing: 6) {
+                            if !trackingGuideActive, !trimmedHintText.isEmpty {
+                                Text(hintText)
+                                    .font(.callout.weight(.semibold))
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 8)
+                                    .background(.thinMaterial)
+                                    .overlay(
+                                        Capsule()
+                                            .fill(Color.black.opacity(0.25))
+                                    )
+                                    .clipShape(Capsule())
+                                    .padding(.top, 4)
+                                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                            }
 
-                        OverlayGuideBanner(text: secondaryGuideText, kind: secondaryGuideKind)
+                            OverlayGuideBanner(text: secondaryGuideText, kind: secondaryGuideKind)
+                        }
+                        .animation(.easeIn(duration: 0.32), value: guidanceAnimationSignature)
                     }
 
                     Spacer()
@@ -1024,7 +1081,7 @@ private struct OverlaysView: View {
                         //     .padding(.horizontal, 16)
                         // }
 
-                        HStack(alignment: .center) {                                                  
+                        HStack(alignment: .center) {
                             Spacer()
 
                             Button {
@@ -1074,30 +1131,38 @@ private struct OverlaysView: View {
                                     .frame(width: 56, height: 56)
                             }
                             .buttonStyle(.plain)
+                            .disabled(trackingGuideActive)
+                            .opacity(trackingGuideActive ? 0.45 : 1)
                             .padding(10)
                             .background(.thinMaterial)
                             .cornerRadius(20)
 
                             Spacer()
                         }
-
-                        ARApplicationFooter(
-                            profileInitial: profileInitial,
-                            selectedFeature: selectedFeature,
-                            onSelectFeature: onSelectFeature,
-                            onAccount: onAccount,
-                            onSettings: onSettings,
-                            onLogOut: onLogOut
-                        )
-                        .background(
-                            GeometryReader { proxy in
-                                Color.clear
-                                    .preference(key: ARFooterHeightPreferenceKey.self, value: proxy.size.height)
-                            }
-                        )
                         .padding(.horizontal, 16)
                     }
-                    .padding(.bottom, 12)
+                    .padding(.bottom, 8)
+                }
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    ARApplicationFooter(
+                        profileInitial: profileInitial,
+                        selectedFeature: selectedFeature,
+                        onSelectFeature: onSelectFeature,
+                        onAccount: onAccount,
+                        onSettings: onSettings,
+                        onLogOut: onLogOut
+                    )
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(key: ARFooterHeightPreferenceKey.self, value: proxy.size.height)
+                        }
+                    )
+                    .frame(maxWidth: .infinity)
+                    .background {
+                        Rectangle()
+                        .fill(Color.black.opacity(0.78))
+                        .ignoresSafeArea(edges: [.horizontal, .bottom])
+                    }
                 }
             }
         }
@@ -1107,7 +1172,7 @@ private struct OverlaysView: View {
     }
 
     private var canPlaceMark: Bool {
-        guard hasValidTarget else { return false }
+        guard hasValidTarget, !trackingGuideActive else { return false }
         return true
     }
 }
@@ -1157,9 +1222,8 @@ private struct ARApplicationFooter: View {
             .padding(.trailing, 4)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(Color.black.opacity(0.78))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .padding(.top, 10)
+        .padding(.bottom, 12)
     }
 
     private func footerFeatureButton(
