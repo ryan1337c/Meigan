@@ -37,6 +37,7 @@ struct ARMeasurementView: View {
     @State private var flattenScanPreviewImage: UIImage?
     @State private var flattenScanResultImage: UIImage?
     @State private var flattenShapeFindings: [FlattenShapeFinding] = []
+    @State private var flattenDetectionPreviewImage: UIImage?
     @State private var isFlattenScanActive = false
     @State private var flattenScanSigmas: [Float] = []
     @State private var flattenScanCornersReady = false
@@ -100,6 +101,7 @@ struct ARMeasurementView: View {
                             flattenScanPreviewImage: $flattenScanPreviewImage,
                             flattenScanResultImage: $flattenScanResultImage,
                             flattenShapeFindings: $flattenShapeFindings,
+                            flattenDetectionPreviewImage: $flattenDetectionPreviewImage,
                             isFlattenScanActive: $isFlattenScanActive,
                             flattenScanSigmas: $flattenScanSigmas,
                             flattenScanCornersReady: $flattenScanCornersReady,
@@ -127,6 +129,7 @@ struct ARMeasurementView: View {
                         flattenSegmentCount: flattenSegmentCount,
                         flattenRelocationActive: flattenRelocationActive,
                         flattenScanCornersReady: flattenScanCornersReady,
+                        isFlattenScanActive: isFlattenScanActive,
                         placementWarningMessage: placementWarningMessage,
                         placementBannerKind: placementBannerKind,
                         trackingGuideMessage: trackingGuideMessage,
@@ -142,10 +145,12 @@ struct ARMeasurementView: View {
                         onSelectFeature: { selectedFeature = $0 },
                         onScreenshot: {
                             guard trackingGuideMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                            guard !isFlattenScanActive else { return }
                             screenshotToken += 1
                         },
                         onPlaceMark: {
                             guard trackingGuideMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                            guard !isFlattenScanActive else { return }
                             guard hasValidTarget else {
                                 arMeasurementUILog.warning("onPlaceMark: ignored (hasValidTarget=false)")
                                 return
@@ -201,20 +206,26 @@ struct ARMeasurementView: View {
                         FlattenWarpResultInspectOverlay(
                             image: result,
                             findings: flattenShapeFindings,
+                            detectionPreviewImage: flattenDetectionPreviewImage,
                             measurementUnit: MeasurementUnit.from(storage: settings.measurementUnit),
                             onDismiss: {
                                 flattenScanResultImage = nil
                                 flattenShapeFindings = []
+                                flattenDetectionPreviewImage = nil
                             },
                             onSave: { exportImage in
                                 saveScreenshotToPhotoLibrary(exportImage) {
                                     flattenScanResultImage = nil
                                     flattenShapeFindings = []
+                                    flattenDetectionPreviewImage = nil
                                 }
                             },
                             onShare: { exportImage in
                                 shareSheetItems = [exportImage]
                                 showShareSheet = true
+                            },
+                            onSaveDetectionPreview: { previewImage in
+                                saveScreenshotToPhotoLibrary(previewImage) {}
                             }
                         )
                     }
@@ -254,6 +265,7 @@ struct ARMeasurementView: View {
             flattenScanPreviewImage = nil
             flattenScanResultImage = nil
             flattenShapeFindings = []
+            flattenDetectionPreviewImage = nil
             isFlattenScanActive = false
         }
         .onChange(of: scenePhase) { phase in
@@ -420,16 +432,60 @@ private struct ScreenshotPreviewOverlay: View {
     }
 }
 
+/// DEBUG sheet showing the grayscale bitmap passed to `VNDetectContoursRequest`.
+#if DEBUG
+private struct FlattenDetectionPreviewSheet: View {
+    let image: UIImage
+    let onSave: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("This is the mono + contrast + median image Vision uses for contour detection. If the object boundary is faint or broken here, tuning contrast alone won’t fix bounding boxes.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    Image(uiImage: image)
+                        .resizable()
+                        .interpolation(.none)
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity)
+                        .background(Color.black.opacity(0.06))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .padding(20)
+            }
+            .navigationTitle("Vision Input")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Save to Photos", action: onSave)
+                }
+            }
+        }
+    }
+}
+#endif
+
 /// Full-color warped result with SwiftUI vector box strokes aligned to `scaledToFit` letterboxing; tap maps to image pixels (smallest clipped bbox wins on overlap).
 private struct FlattenWarpResultInspectOverlay: View {
     let image: UIImage
     let findings: [FlattenShapeFinding]
+    let detectionPreviewImage: UIImage?
     let measurementUnit: MeasurementUnit
     let onDismiss: () -> Void
     let onSave: (UIImage) -> Void
     let onShare: (UIImage) -> Void
+    var onSaveDetectionPreview: ((UIImage) -> Void)?
 
     @State private var selectedFindingId: UUID?
+    @State private var showsDetectionPreviewSheet = false
 
     var body: some View {
         GeometryReader { geo in
@@ -517,6 +573,18 @@ private struct FlattenWarpResultInspectOverlay: View {
                         .allowsHitTesting(false)
 
                     VStack(spacing: 10) {
+                        #if DEBUG
+                        if detectionPreviewImage != nil {
+                            Button {
+                                showsDetectionPreviewSheet = true
+                            } label: {
+                                Text("Vision Input")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        #endif
+
                         HStack(spacing: 10) {
                             Button {
                                 onShare(exportImageForAlbum())
@@ -550,6 +618,18 @@ private struct FlattenWarpResultInspectOverlay: View {
             .onChange(of: findings) { _ in
                 selectedFindingId = nil
             }
+            #if DEBUG
+            .sheet(isPresented: $showsDetectionPreviewSheet) {
+                if let detectionPreviewImage {
+                    FlattenDetectionPreviewSheet(
+                        image: detectionPreviewImage,
+                        onSave: {
+                            onSaveDetectionPreview?(detectionPreviewImage)
+                        }
+                    )
+                }
+            }
+            #endif
         }
     }
 
@@ -905,6 +985,7 @@ private struct OverlaysView: View {
     let flattenSegmentCount: Int
     let flattenRelocationActive: Bool
     let flattenScanCornersReady: Bool
+    let isFlattenScanActive: Bool
     let placementWarningMessage: String
     let placementBannerKind: PlacementBannerKind
     let trackingGuideMessage: String
@@ -945,6 +1026,7 @@ private struct OverlaysView: View {
 
     /// Same capsule as coordinator `showPlacementWarning(..., .instruction)` messages (“Corner …”, “All 4 corners…”).
     private var secondaryGuideText: String {
+        guard !isFlattenScanActive else { return "" }
         if trackingGuideActive {
             return trackingGuideMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -976,13 +1058,13 @@ private struct OverlaysView: View {
     /// Drives ease-in (no ease-out) when hint / tracking / placement secondary copy changes.
     private var guidanceAnimationSignature: String {
         let sec = secondaryGuideText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return "\(trackingGuideActive)|\(trimmedHintText)|\(sec)|\(String(describing: secondaryGuideKind))"
+        return "\(isFlattenScanActive)|\(trackingGuideActive)|\(trimmedHintText)|\(sec)|\(String(describing: secondaryGuideKind))"
     }
 
     var body: some View {
         ZStack {
             if !isCoachingActive {
-                if hasValidTarget, !trackingGuideActive {
+                if hasValidTarget, !trackingGuideActive, !isFlattenScanActive {
                     Circle()
                         .fill(Color.white)
                         .frame(width: 6, height: 6)
@@ -1002,6 +1084,8 @@ private struct OverlaysView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.regular)
+                        .disabled(isFlattenScanActive)
+                        .opacity(isFlattenScanActive ? 0.45 : 1)
                         .accessibilityLabel("Back")
 
                         Spacer()
@@ -1018,18 +1102,24 @@ private struct OverlaysView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.regular)
+                        .disabled(isFlattenScanActive)
+                        .opacity(isFlattenScanActive ? 0.45 : 1)
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
                     .padding(.bottom, 22)
 
-                    if let savedMessage = photoSavedBannerMessage {
+                    if isFlattenScanActive {
+                        Color.clear
+                            .frame(height: 1)
+                            .padding(.top, 4)
+                    } else if let savedMessage = photoSavedBannerMessage {
                         TopDownNoticeBanner(message: savedMessage)
                             .padding(.top, 4)
                             .transition(.move(edge: .top).combined(with: .opacity))
                     } else {
                         VStack(spacing: 6) {
-                            if !trackingGuideActive, !trimmedHintText.isEmpty {
+                            if !trackingGuideActive, !isFlattenScanActive, !trimmedHintText.isEmpty {
                                 Text(hintText)
                                     .font(.callout.weight(.semibold))
                                     .multilineTextAlignment(.center)
@@ -1047,7 +1137,7 @@ private struct OverlaysView: View {
 
                             OverlayGuideBanner(text: secondaryGuideText, kind: secondaryGuideKind)
                         }
-                        .animation(.easeIn(duration: 0.32), value: guidanceAnimationSignature)
+                        .animation(.easeIn(duration: 0.14), value: guidanceAnimationSignature)
                     }
 
                     Spacer()
@@ -1117,8 +1207,10 @@ private struct OverlaysView: View {
                                     RoundedRectangle(cornerRadius: 16)
                                         .strokeBorder(Color.white.opacity(flattenScanCornersReady ? 0 : 0.35), lineWidth: 1)
                                 )
-                                .disabled(!flattenScanCornersReady)
-                                .opacity(flattenScanCornersReady ? 1 : 0.72)
+                                .disabled(!flattenScanCornersReady || isFlattenScanActive)
+                                .opacity(
+                                    flattenScanCornersReady && !isFlattenScanActive ? 1 : 0.72
+                                )
                             }
 
                             Spacer()
@@ -1131,8 +1223,8 @@ private struct OverlaysView: View {
                                     .frame(width: 56, height: 56)
                             }
                             .buttonStyle(.plain)
-                            .disabled(trackingGuideActive)
-                            .opacity(trackingGuideActive ? 0.45 : 1)
+                            .disabled(trackingGuideActive || isFlattenScanActive)
+                            .opacity((trackingGuideActive || isFlattenScanActive) ? 0.45 : 1)
                             .padding(10)
                             .background(.thinMaterial)
                             .cornerRadius(20)
@@ -1147,6 +1239,7 @@ private struct OverlaysView: View {
                     ARApplicationFooter(
                         profileInitial: profileInitial,
                         selectedFeature: selectedFeature,
+                        interactionLockedDuringFlattenScan: isFlattenScanActive,
                         onSelectFeature: onSelectFeature,
                         onAccount: onAccount,
                         onSettings: onSettings,
@@ -1172,7 +1265,7 @@ private struct OverlaysView: View {
     }
 
     private var canPlaceMark: Bool {
-        guard hasValidTarget, !trackingGuideActive else { return false }
+        guard hasValidTarget, !trackingGuideActive, !isFlattenScanActive else { return false }
         return true
     }
 }
@@ -1188,6 +1281,7 @@ private struct ARFooterHeightPreferenceKey: PreferenceKey {
 private struct ARApplicationFooter: View {
     let profileInitial: String
     let selectedFeature: ARFooterFeature
+    let interactionLockedDuringFlattenScan: Bool
     let onSelectFeature: (ARFooterFeature) -> Void
     let onAccount: () -> Void
     let onSettings: () -> Void
@@ -1203,6 +1297,8 @@ private struct ARApplicationFooter: View {
                 onSelectFeature(.ruler)
             }
             .frame(maxWidth: .infinity)
+            .disabled(interactionLockedDuringFlattenScan)
+            .opacity(interactionLockedDuringFlattenScan ? 0.45 : 1)
 
             footerFeatureButton(
                 title: "Flatten",
@@ -1212,6 +1308,8 @@ private struct ARApplicationFooter: View {
                 onSelectFeature(.flatten)
             }
             .frame(maxWidth: .infinity)
+            .disabled(interactionLockedDuringFlattenScan)
+            .opacity(interactionLockedDuringFlattenScan ? 0.45 : 1)
 
             ARProfileAvatarMenu(
                 initial: profileInitial,
@@ -1219,6 +1317,8 @@ private struct ARApplicationFooter: View {
                 onSettings: onSettings,
                 onLogOut: onLogOut
             )
+            .disabled(interactionLockedDuringFlattenScan)
+            .opacity(interactionLockedDuringFlattenScan ? 0.45 : 1)
             .padding(.trailing, 4)
         }
         .padding(.horizontal, 12)

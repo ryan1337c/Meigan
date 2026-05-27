@@ -120,6 +120,7 @@ struct ARSceneView: UIViewRepresentable {
     @Binding var flattenScanPreviewImage: UIImage?
     @Binding var flattenScanResultImage: UIImage?
     @Binding var flattenShapeFindings: [FlattenShapeFinding]
+    @Binding var flattenDetectionPreviewImage: UIImage?
     @Binding var isFlattenScanActive: Bool
     @Binding var flattenScanSigmas: [Float]
     @Binding var flattenScanCornersReady: Bool
@@ -152,6 +153,7 @@ struct ARSceneView: UIViewRepresentable {
         @Binding var flattenScanPreviewImage: UIImage?
         @Binding var flattenScanResultImage: UIImage?
         @Binding var flattenShapeFindings: [FlattenShapeFinding]
+        @Binding var flattenDetectionPreviewImage: UIImage?
         @Binding var isFlattenScanActive: Bool
         @Binding var flattenScanSigmas: [Float]
         @Binding var flattenScanCornersReady: Bool
@@ -302,12 +304,19 @@ struct ARSceneView: UIViewRepresentable {
 
 
         // Custom motion detection (replace ARKit's excessive motion):
+        /// Per-frame metric: displacement weight × translation (m) + rotation weight × angular delta (rad).
+        private let customExcessiveMotionThreshold: Float = 0.008
+        /// Translation (m/frame) multiplied by this for `motionScore`; lower = more lenient on movement.
+        private let customExcessiveMotionDisplacementWeight: Float = 0.25
+        /// Rotation (rad/frame) multiplied by this and added to translation for `motionScore`; tune on device (~0.05).
+        private let customExcessiveMotionRotationWeight: Float = 0.09
         private var lastCameraTransform: simd_float4x4?
-        private let customExcessiveMotionThreshold: Float = 0.01  // meters per frame
         private var customExcessiveMotionFrameCount = 0
         private let customExcessiveMotionShowThreshold = 2
         private var customExcessiveMotionActive = false
         private var customMotionPromotedIssue: ResolvedTrackingGuideIssue = .none // Add new property for custom motion (separate from ARKit's state)
+
+        var flattenScanOccludesPlacementChrome = false
 
         /// Issue currently shown in the tracking guide banner.
         private var displayedTrackingGuideIssue: ResolvedTrackingGuideIssue = .none
@@ -352,6 +361,7 @@ struct ARSceneView: UIViewRepresentable {
             flattenScanPreviewImage: Binding<UIImage?>,
             flattenScanResultImage: Binding<UIImage?>,
             flattenShapeFindings: Binding<[FlattenShapeFinding]>,
+            flattenDetectionPreviewImage: Binding<UIImage?>,
             isFlattenScanActive: Binding<Bool>,
             flattenScanSigmas: Binding<[Float]>,
             flattenScanCornersReady: Binding<Bool>,
@@ -376,6 +386,7 @@ struct ARSceneView: UIViewRepresentable {
             _flattenScanPreviewImage = flattenScanPreviewImage
             _flattenScanResultImage = flattenScanResultImage
             _flattenShapeFindings = flattenShapeFindings
+            _flattenDetectionPreviewImage = flattenDetectionPreviewImage
             _isFlattenScanActive = isFlattenScanActive
             _flattenScanSigmas = flattenScanSigmas
             _flattenScanCornersReady = flattenScanCornersReady
@@ -400,6 +411,7 @@ struct ARSceneView: UIViewRepresentable {
             updateSubscription?.cancel()
             updateSubscription = nil
             cancelTrackingGuideTransition()
+            flattenScanOccludesPlacementChrome = false
 
             if let arView {
                 arView.session.delegate = nil
@@ -712,7 +724,7 @@ struct ARSceneView: UIViewRepresentable {
                     currentTransform.columns.3.y,
                     currentTransform.columns.3.z
                 )
-                
+
                 if let lastTransform = self.lastCameraTransform {
                     let lastPos = SIMD3<Float>(
                         lastTransform.columns.3.x,
@@ -720,8 +732,11 @@ struct ARSceneView: UIViewRepresentable {
                         lastTransform.columns.3.z
                     )
                     let displacement = simd_distance(currentPos, lastPos)
-                    
-                    if displacement > self.customExcessiveMotionThreshold {
+                    let rotationDelta = Self.rotationDeltaRadians(from: lastTransform, to: currentTransform)
+                    let motionScore = self.customExcessiveMotionDisplacementWeight * displacement
+                        + self.customExcessiveMotionRotationWeight * rotationDelta
+
+                    if motionScore > self.customExcessiveMotionThreshold {
                         self.customExcessiveMotionFrameCount += 1
                         if self.customExcessiveMotionFrameCount >= self.customExcessiveMotionShowThreshold {
                             if !self.customExcessiveMotionActive {
@@ -784,7 +799,19 @@ struct ARSceneView: UIViewRepresentable {
                 if self.isFlattenScanSnapshotCaptureActive || self.isFlattenScanActive {
                     self.ringEntity?.isEnabled = false
                     self.updatePlacementGuide(.none)
+                    self.updatePinAutolockHaptics(pinWorld: nil)
+                    self.latestPinAutolockWorld = nil
+                    self.lineMidHoverDotEntity?.isEnabled = false
                     DispatchQueue.main.async { self.hasValidTarget = false }
+                    return
+                }
+
+                if self.displayedTrackingGuideIssue != .none {
+                    self.updatePlacementGuide(.none)
+                    self.updatePinAutolockHaptics(pinWorld: nil)
+                    self.latestPinAutolockWorld = nil
+                    self.lineMidHoverDotEntity?.isEnabled = false
+                    self.hideRing()
                     return
                 }
 
@@ -889,11 +916,6 @@ struct ARSceneView: UIViewRepresentable {
 
                 // Valid aim (surface raycast and/or line pinpoint autolock)
                 self.consecutiveMisses = 0
-                if self.displayedTrackingGuideIssue != .none {
-                    self.hideRing()
-                    DispatchQueue.main.async { self.hasValidTarget = false }
-                    return
-                }
                 let ringWasVisible = self.ringEntity?.isEnabled == true
                 if !ringWasVisible {
                     self.consecutiveHits += 1
@@ -1032,6 +1054,31 @@ struct ARSceneView: UIViewRepresentable {
             publishMergedTrackingGuideIfNeeded()
         }
 
+        /// True while flatten scan preview/processing hides placement + tracking banner chrome.
+        private var placementBannerChromeMutedForFlattenCapture: Bool {
+            isFlattenScanActive || flattenScanOccludesPlacementChrome
+        }
+
+        /// Clears SwiftUI capsules and blocks banner republish until flatten pipeline releases
+        /// `flattenScanOccludesPlacementChrome`.
+        func suppressPlacementBannerChromeDuringFlattenPipelineHandoff() {
+            flattenScanOccludesPlacementChrome = true
+            cancelTrackingGuideTransition()
+            let flush = { [weak self] in
+                guard let self else { return }
+                self.placementWarningMessage = ""
+                self.trackingGuideMessage = ""
+                self.activeTrackingReason = nil
+                self.displayedTrackingGuideIssue = .none
+                self.trackingGuideDisplayedAt = nil
+            }
+            if Thread.isMainThread {
+                flush()
+            } else {
+                DispatchQueue.main.sync(execute: flush)
+            }
+        }
+
         // MARK - Lighting guidance
         private func updateSmoothedAmbientIntensity(_ lightEstimate: ARLightEstimate?) {
             guard let lightEstimate else { return }
@@ -1075,6 +1122,27 @@ struct ARSceneView: UIViewRepresentable {
         }
 
 
+        /// Angle (radians) between previous and current camera orientations (minimal rotation delta).
+        private static func rotationDeltaRadians(from previous: simd_float4x4, to current: simd_float4x4) -> Float {
+            let pr = simd_float3x3(
+                SIMD3(previous.columns.0.x, previous.columns.0.y, previous.columns.0.z),
+                SIMD3(previous.columns.1.x, previous.columns.1.y, previous.columns.1.z),
+                SIMD3(previous.columns.2.x, previous.columns.2.y, previous.columns.2.z)
+            )
+            let cr = simd_float3x3(
+                SIMD3(current.columns.0.x, current.columns.0.y, current.columns.0.z),
+                SIMD3(current.columns.1.x, current.columns.1.y, current.columns.1.z),
+                SIMD3(current.columns.2.x, current.columns.2.y, current.columns.2.z)
+            )
+            let delta = simd_mul(cr, simd_transpose(pr))
+            let trace =
+                delta.columns.0.x + delta.columns.1.y + delta.columns.2.z
+            let cosTheta = Float(
+                max(-1, min(1, Double((trace - 1) * 0.5)))
+            )
+            return acos(cosTheta)
+        }
+
         // Update the custom motion publisher
         private func publishCustomExcessiveMotion(_ isActive: Bool) {
             let newIssue: ResolvedTrackingGuideIssue = isActive ? .excessiveMotion : .none
@@ -1117,9 +1185,14 @@ struct ARSceneView: UIViewRepresentable {
 
         /// Single publish point for SwiftUI tracking guide bindings with global priority:
         /// tooDark > tooClose > excessiveMotion > findNearbySurface.
-        /// Each guide stays visible for at least `trackingGuideMinimumDisplayDuration` and persists
-        /// while the resolved issue is unchanged; transitions wait out the minimum before updating.
+        /// Resolved issue persists while unchanged. Switching to another **non-empty** guide commits
+        /// immediately (no minimum-delay wait). Clearing the banner waits out the remainder of
+        /// `trackingGuideMinimumDisplayDuration` so short flickers don't hide guidance too soon.
         private func publishMergedTrackingGuideIfNeeded() {
+            if placementBannerChromeMutedForFlattenCapture {
+                cancelTrackingGuideTransition()
+                return
+            }
             let resolvedIssue = resolveMergedTrackingGuideIssue()
             if resolvedIssue == displayedTrackingGuideIssue {
                 cancelTrackingGuideTransition()
@@ -1136,17 +1209,26 @@ struct ARSceneView: UIViewRepresentable {
         private func scheduleTrackingGuideTransition() {
             cancelTrackingGuideTransition()
 
+            let resolved = resolveMergedTrackingGuideIssue()
+
             if displayedTrackingGuideIssue == .none {
-                commitTrackingGuideDisplay(resolveMergedTrackingGuideIssue())
+                commitTrackingGuideDisplay(resolved)
                 return
             }
 
+            // Any change to another concrete guide swaps immediately — no minimum wait between messages.
+            if resolved != .none {
+                commitTrackingGuideDisplay(resolved)
+                return
+            }
+
+            // Dismissing: honor minimum elapsed time since this guide appeared.
             let elapsed = trackingGuideDisplayedAt.map { Date().timeIntervalSince($0) }
                 ?? Self.trackingGuideMinimumDisplayDuration
             let delay = max(0, Self.trackingGuideMinimumDisplayDuration - elapsed)
 
             if delay <= 0 {
-                commitTrackingGuideDisplay(resolveMergedTrackingGuideIssue())
+                commitTrackingGuideDisplay(resolved)
                 return
             }
 
@@ -1154,7 +1236,7 @@ struct ARSceneView: UIViewRepresentable {
                 guard let self else { return }
                 self.trackingGuideTransitionWorkItem = nil
                 let latestIssue = self.resolveMergedTrackingGuideIssue()
-                guard latestIssue != self.displayedTrackingGuideIssue else { return }
+                guard latestIssue == .none else { return }
                 self.commitTrackingGuideDisplay(latestIssue)
             }
             trackingGuideTransitionWorkItem = work
@@ -1310,6 +1392,7 @@ struct ARSceneView: UIViewRepresentable {
 
         /// Renders the AR view to an image; parent shows preview and runs Save / Share only after explicit confirmation.
         private func captureScreenshotForPreview() {
+            guard !placementBannerChromeMutedForFlattenCapture else { return }
             guard let arView = arView else { return }
             arView.snapshot(saveToHDR: false) { [weak self] image in
                 guard let self, let image else { return }
@@ -1455,6 +1538,9 @@ struct ARSceneView: UIViewRepresentable {
         }
 
         private func placeMarkAtReticle() {
+            if placementBannerChromeMutedForFlattenCapture {
+                return
+            }
             let resolvedIssue = resolveMergedTrackingGuideIssue()
             if resolvedIssue != .none {
                 let guidance = messageAndReason(for: resolvedIssue)
@@ -1471,6 +1557,9 @@ struct ARSceneView: UIViewRepresentable {
         }
 
         func showPlacementWarning(_ message: String, kind: PlacementBannerKind = .alert) {
+            if placementBannerChromeMutedForFlattenCapture {
+                return
+            }
             if kind == .alert, hapticFeedbackEnabled {
                 UINotificationFeedbackGenerator().notificationOccurred(.warning)
             }
@@ -1485,11 +1574,13 @@ struct ARSceneView: UIViewRepresentable {
             if isFlattenScanActive {
                 flattenScanInvalidateGeneration += 1
                 DispatchQueue.main.async {
+                    self.flattenScanOccludesPlacementChrome = false
                     self.isFlattenScanActive = false
                     self.flattenScanPreviewImage = nil
                     self.flattenScanResultImage = nil
                     self.flattenScanSigmas = []
                     self.flattenShapeFindings = []
+                    self.flattenDetectionPreviewImage = nil
                 }
                 return
             }
@@ -1517,6 +1608,7 @@ struct ARSceneView: UIViewRepresentable {
             latestPinAutolockWorld = nil
             lastPreviewReadoutString = ""
             DispatchQueue.main.async {
+                self.flattenScanOccludesPlacementChrome = false
                 self.measurementReadout = "—"
                 self.markCount = 0
                 self.flattenSegmentCount = 0
@@ -1525,6 +1617,7 @@ struct ARSceneView: UIViewRepresentable {
                 self.flattenScanPreviewImage = nil
                 self.flattenScanResultImage = nil
                 self.flattenShapeFindings = []
+                self.flattenDetectionPreviewImage = nil
                 self.flattenScanSigmas = []
                 self.flattenScanCornersReady = false
             }
@@ -2058,6 +2151,7 @@ struct ARSceneView: UIViewRepresentable {
             flattenScanPreviewImage: $flattenScanPreviewImage,
             flattenScanResultImage: $flattenScanResultImage,
             flattenShapeFindings: $flattenShapeFindings,
+            flattenDetectionPreviewImage: $flattenDetectionPreviewImage,
             isFlattenScanActive: $isFlattenScanActive,
             flattenScanSigmas: $flattenScanSigmas,
             flattenScanCornersReady: $flattenScanCornersReady,
@@ -2151,6 +2245,7 @@ struct ARSceneView: UIViewRepresentable {
         flattenScanPreviewImage: .constant(nil),
         flattenScanResultImage: .constant(nil),
         flattenShapeFindings: .constant([]),
+        flattenDetectionPreviewImage: .constant(nil),
         isFlattenScanActive: .constant(false),
         flattenScanSigmas: .constant([]),
         flattenScanCornersReady: .constant(false),

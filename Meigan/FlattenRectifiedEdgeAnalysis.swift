@@ -45,7 +45,7 @@ struct FlattenShapeDetectionTuning: Equatable, Sendable {
     /// Merge contour fragments whose boxes intersect after expanding by this fraction of the image's longest edge.
     var mergePaddingFractionOfLongestEdge: CGFloat
     /// Ramer–Douglas–Peucker tolerance in **warped** pixels (larger = fewer vertices).
-    var simplifyEpsilonWarpedPixels: CGFloat
+    // var simplifyEpsilonWarpedPixels: CGFloat
     /// After filtering, keep at most this many shapes by descending clipped bbox area (`0` = unlimited).
     var maxReturnedShapes: Int
 
@@ -57,9 +57,15 @@ struct FlattenShapeDetectionTuning: Equatable, Sendable {
         minimumObjectAreaFraction: 0.003,
         maxBoundingBoxAreaFraction: 0.88,
         mergePaddingFractionOfLongestEdge: 0.035,
-        simplifyEpsilonWarpedPixels: 2,
         maxReturnedShapes: 32
     )
+}
+
+/// Contour detection output plus the grayscale CI bitmap fed to Vision (for tuning / debug).
+struct FlattenShapeDetectionResult: Sendable {
+    let findings: [FlattenShapeFinding]
+    /// Mono + contrast + median pipeline at detection resolution — never shown in the main UI.
+    let detectionPreviewImage: UIImage?
 }
 
 /// Contour-driven shape discovery on the birds-eye `UIImage` from `inverseWarpQuadImage`.
@@ -85,27 +91,43 @@ enum FlattenRectifiedEdgeAnalysis {
         pixelsPerMeter: Float,
         tuning: FlattenShapeDetectionTuning = .default
     ) -> [FlattenShapeFinding] {
+        detectShapes(for: warpedImage, pixelsPerMeter: pixelsPerMeter, tuning: tuning).findings
+    }
+
+    static func detectShapes(
+        for warpedImage: UIImage,
+        pixelsPerMeter: Float,
+        tuning: FlattenShapeDetectionTuning = .default
+    ) -> FlattenShapeDetectionResult {
         guard pixelsPerMeter > 1e-6,
               let cgImage = warpedImage.cgImage
-        else { return [] }
+        else {
+            return FlattenShapeDetectionResult(findings: [], detectionPreviewImage: nil)
+        }
 
         let fullWidth = CGFloat(cgImage.width)
         let fullHeight = CGFloat(cgImage.height)
         let imageBounds = CGRect(x: 0, y: 0, width: fullWidth, height: fullHeight)
-        guard fullWidth >= 8, fullHeight >= 8 else { return [] }
+        guard fullWidth >= 8, fullHeight >= 8 else {
+            return FlattenShapeDetectionResult(findings: [], detectionPreviewImage: nil)
+        }
 
         guard let detection = makeDetectionCGImage(from: cgImage, tuning: tuning) else {
-            return []
+            return FlattenShapeDetectionResult(findings: [], detectionPreviewImage: nil)
         }
+
+        let detectionPreviewImage = UIImage(cgImage: detection)
 
         let detW = CGFloat(detection.width)
         let detH = CGFloat(detection.height)
         let scaleToWarped = fullWidth / detW
 
-        guard let observation = runContourRequest(on: detection, tuning: tuning) else { return [] }
+        guard let observation = runContourRequest(on: detection, tuning: tuning) else {
+            return FlattenShapeDetectionResult(findings: [], detectionPreviewImage: detectionPreviewImage)
+        }
 
         var candidates: [ShapeCandidate] = []
-        for contour in flattenedContours(from: observation) {
+        for contour in topLevelContours(from: observation) {
             guard let candidate = makeCandidate(
                 from: contour,
                 detectionWidth: detW,
@@ -118,7 +140,7 @@ enum FlattenRectifiedEdgeAnalysis {
         }
 
         let findings = makeFindings(
-            from: mergeCandidates(candidates, imageBounds: imageBounds, tuning: tuning),
+            from: candidates,
             imageBounds: imageBounds,
             pixelsPerMeter: pixelsPerMeter,
             tuning: tuning
@@ -134,7 +156,10 @@ enum FlattenRectifiedEdgeAnalysis {
         if tuning.maxReturnedShapes > 0, sortedFindings.count > tuning.maxReturnedShapes {
             sortedFindings = Array(sortedFindings.prefix(tuning.maxReturnedShapes))
         }
-        return sortedFindings
+        return FlattenShapeDetectionResult(
+            findings: sortedFindings,
+            detectionPreviewImage: detectionPreviewImage
+        )
     }
 
     // MARK: - CI detection image (never shown)
@@ -191,18 +216,9 @@ enum FlattenRectifiedEdgeAnalysis {
         }
     }
 
-    private static func flattenedContours(from observation: VNContoursObservation) -> [VNContour] {
-        var list: [VNContour] = []
-        func visit(_ c: VNContour) {
-            list.append(c)
-            for child in c.childContours {
-                visit(child)
-            }
-        }
-        for root in observation.topLevelContours {
-            visit(root)
-        }
-        return list
+    /// Top-level Vision contours only — skips nested `childContours` (grip ribs, inner holes, etc.).
+    private static func topLevelContours(from observation: VNContoursObservation) -> [VNContour] {
+        observation.topLevelContours
     }
 
     private static func makeCandidate(
@@ -245,8 +261,7 @@ enum FlattenRectifiedEdgeAnalysis {
             warpedPoints.append(CGPoint(x: xWarped, y: yWarped))
         }
 
-        let simplified = simplifyClosedPolygon(warpedPoints, epsilon: tuning.simplifyEpsilonWarpedPixels)
-        let loop = closedPointLoop(simplified)
+        let loop = closedPointLoop(warpedPoints)
         guard loop.count >= 3 else { return nil }
 
         let rawAABB = boundingBox(of: loop)
@@ -311,7 +326,9 @@ enum FlattenRectifiedEdgeAnalysis {
             imageArea * tuning.minimumObjectAreaFraction
         )
 
-        return candidates.compactMap { candidate in
+        let mergedCandidates = mergeCandidates(candidates, imageBounds: imageBounds, tuning: tuning)
+
+        return mergedCandidates.compactMap { candidate in
             let clippedRect = candidate.boundingRectImage.intersection(imageBounds)
             let rectArea = area(of: clippedRect)
             guard clippedRect.width >= 2, clippedRect.height >= 2,
@@ -367,57 +384,57 @@ enum FlattenRectifiedEdgeAnalysis {
     }
 
     /// Ramer–Douglas–Peucker on an implicitly closed ring (drops duplicate closing vertex before simplify).
-    private static func simplifyClosedPolygon(_ ring: [CGPoint], epsilon: CGFloat) -> [CGPoint] {
-        guard ring.count > 2 else { return ring }
-        var open = ring
-        if let f = open.first, let l = open.last, hypot(l.x - f.x, l.y - f.y) < 1e-3 {
-            open.removeLast()
-        }
-        guard open.count > 2 else { return ring }
-        let simplifiedOpen = rdp(open, epsilon: epsilon)
-        return simplifiedOpen
-    }
+    // private static func simplifyClosedPolygon(_ ring: [CGPoint], epsilon: CGFloat) -> [CGPoint] {
+    //     guard ring.count > 2 else { return ring }
+    //     var open = ring
+    //     if let f = open.first, let l = open.last, hypot(l.x - f.x, l.y - f.y) < 1e-3 {
+    //         open.removeLast()
+    //     }
+    //     guard open.count > 2 else { return ring }
+    //     let simplifiedOpen = rdp(open, epsilon: epsilon)
+    //     return simplifiedOpen
+    // }
 
-    private static func rdp(_ points: [CGPoint], epsilon: CGFloat) -> [CGPoint] {
-        guard points.count > 2 else { return points }
-        var first = 0
-        var last = points.count - 1
-        var indices = Set<Int>([first, last])
-        var stack: [(Int, Int)] = [(first, last)]
+    // private static func rdp(_ points: [CGPoint], epsilon: CGFloat) -> [CGPoint] {
+    //     guard points.count > 2 else { return points }
+    //     var first = 0
+    //     var last = points.count - 1
+    //     var indices = Set<Int>([first, last])
+    //     var stack: [(Int, Int)] = [(first, last)]
 
-        while let range = stack.popLast() {
-            first = range.0
-            last = range.1
-            var maxDist: CGFloat = 0
-            var index = 0
-            let a = points[first]
-            let b = points[last]
-            for i in (first + 1)..<last {
-                let d = perpendicularDistance(points[i], lineStart: a, lineEnd: b)
-                if d > maxDist {
-                    index = i
-                    maxDist = d
-                }
-            }
-            if maxDist > epsilon {
-                indices.insert(index)
-                stack.append((first, index))
-                stack.append((index, last))
-            }
-        }
+    //     while let range = stack.popLast() {
+    //         first = range.0
+    //         last = range.1
+    //         var maxDist: CGFloat = 0
+    //         var index = 0
+    //         let a = points[first]
+    //         let b = points[last]
+    //         for i in (first + 1)..<last {
+    //             let d = perpendicularDistance(points[i], lineStart: a, lineEnd: b)
+    //             if d > maxDist {
+    //                 index = i
+    //                 maxDist = d
+    //             }
+    //         }
+    //         if maxDist > epsilon {
+    //             indices.insert(index)
+    //             stack.append((first, index))
+    //             stack.append((index, last))
+    //         }
+    //     }
 
-        return points.indices.filter { indices.contains($0) }.map { points[$0] }
-    }
+    //     return points.indices.filter { indices.contains($0) }.map { points[$0] }
+    // }
 
-    private static func perpendicularDistance(_ p: CGPoint, lineStart a: CGPoint, lineEnd b: CGPoint) -> CGFloat {
-        let dx = b.x - a.x
-        let dy = b.y - a.y
-        let lenSq = dx * dx + dy * dy
-        if lenSq < 1e-18 { return hypot(p.x - a.x, p.y - a.y) }
-        let t = max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq))
-        let proj = CGPoint(x: a.x + t * dx, y: a.y + t * dy)
-        return hypot(p.x - proj.x, p.y - proj.y)
-    }
+    // private static func perpendicularDistance(_ p: CGPoint, lineStart a: CGPoint, lineEnd b: CGPoint) -> CGFloat {
+    //     let dx = b.x - a.x
+    //     let dy = b.y - a.y
+    //     let lenSq = dx * dx + dy * dy
+    //     if lenSq < 1e-18 { return hypot(p.x - a.x, p.y - a.y) }
+    //     let t = max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq))
+    //     let proj = CGPoint(x: a.x + t * dx, y: a.y + t * dy)
+    //     return hypot(p.x - proj.x, p.y - proj.y)
+    // }
 
     /// Total length of `points` after clipping each segment to `bounds`. When `closed`, includes segment last→first.
     private static func visiblePolylineLength(in bounds: CGRect, closed: Bool, points: [CGPoint]) -> CGFloat {

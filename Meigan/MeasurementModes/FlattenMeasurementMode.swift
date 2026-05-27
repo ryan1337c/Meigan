@@ -140,12 +140,15 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
         DispatchQueue.main.async { [weak self, weak host, weak arView] in
             guard let self, let host, let arView else { return }
 
+            host.suppressPlacementBannerChromeDuringFlattenPipelineHandoff()
+
             host.beginFlattenScanSnapshotDecorations()
             host.applyFlattenScanPreviewSnapshotVisibility()
             arView.snapshot(saveToHDR: false) { previewFull in
                 DispatchQueue.main.async { [weak self, weak host, weak arView, previewFull] in
                     guard let host else { return }
                     guard let self, let arView else {
+                        host.flattenScanOccludesPlacementChrome = false
                         host.restoreFlattenScanSnapshotDecorations()
                         return
                     }
@@ -154,8 +157,12 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
                         DispatchQueue.main.async { [weak self, weak host, weak arView, previewFull] in
                             guard let host else { return }
                             host.restoreFlattenScanSnapshotDecorations()
-                            guard let self, let arView else { return }
+                            guard let self, let arView else {
+                                host.flattenScanOccludesPlacementChrome = false
+                                return
+                            }
                             guard let previewFull, let rawFull else {
+                                host.flattenScanOccludesPlacementChrome = false
                                 host.showPlacementWarning("Scan cancelled. Could not capture the AR view.", kind: .alert)
                                 return
                             }
@@ -163,6 +170,7 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
                             guard Self.pointsMatch(points, currentPoints),
                                   self.allPointsVisible(currentPoints, in: arView)
                             else {
+                                host.flattenScanOccludesPlacementChrome = false
                                 host.showPlacementWarning("Aim the camera so all 4 corners are visible, then tap Scan.", kind: .instruction)
                                 return
                             }
@@ -201,8 +209,11 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
         host.flattenScanPreviewImage = previewImage
         host.flattenScanResultImage = nil
         host.flattenShapeFindings = []
+        host.flattenDetectionPreviewImage = nil
         host.flattenScanSigmas = []
         host.isFlattenScanActive = true
+        host.flattenScanOccludesPlacementChrome = false
+        host.clearFlattenLiveMeasurementAfterSuccessfulScan()
 
         let canvasSize = Self.scanCanvasSize(in: arView, footerHeight: host.flattenFooterHeight)
         let measurementUnit = MeasurementUnit.from(storage: host.measurementUnitRaw)
@@ -226,34 +237,39 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
             case .failure:
                 warpedImage = nil
             }
-            let shapeFindings: [FlattenShapeFinding] = {
-                guard let warpedImage else { return [] }
+            let shapeDetection: FlattenShapeDetectionResult = {
+                guard let warpedImage else {
+                    return FlattenShapeDetectionResult(findings: [], detectionPreviewImage: nil)
+                }
                 let renderedPixelsPerMeter = Self.renderedPixelsPerMeter(
                     for: warpedImage,
                     analysis: analysis
                 )
-                return FlattenRectifiedEdgeAnalysis.shapeFindings(
+                return FlattenRectifiedEdgeAnalysis.detectShapes(
                     for: warpedImage,
                     pixelsPerMeter: renderedPixelsPerMeter
                 )
             }()
-                return (analysis, outcome, warpedImage, shapeFindings)
+                return (analysis, outcome, warpedImage, shapeDetection)
             }
             let minimumAnimationDuration: TimeInterval = 1.2
             DispatchQueue.main.asyncAfter(deadline: .now() + minimumAnimationDuration) { [weak host] in
                 guard let host else { return }
                 guard host.flattenScanInvalidateGeneration == completionToken else {
                     // Scan invalidated (clear marks, new scan, etc.): drop in-flight result state.
+                    host.flattenScanOccludesPlacementChrome = false
                     host.isFlattenScanActive = false
                     host.flattenScanPreviewImage = nil
                     host.flattenScanResultImage = nil
                     host.flattenShapeFindings = []
+                    host.flattenDetectionPreviewImage = nil
                     return
                 }
 
-                let (analysis, outcome, warpedImage, shapeFindings) = result
+                let (analysis, outcome, warpedImage, shapeDetection) = result
                 host.flattenScanSigmas = analysis.singularValues
                 host.isFlattenScanActive = false
+                host.flattenScanOccludesPlacementChrome = false
                 host.flattenScanPreviewImage = nil
                 switch outcome {
                 case .success:
@@ -262,9 +278,9 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
                         return
                     }
                     host.flattenScanResultImage = warpedImage
-                    host.flattenShapeFindings = shapeFindings
+                    host.flattenShapeFindings = shapeDetection.findings
+                    host.flattenDetectionPreviewImage = shapeDetection.detectionPreviewImage
                     host.showPlacementWarning(Self.scanCompleteMessage(sigmas: analysis.singularValues), kind: .instruction)
-                    host.clearFlattenLiveMeasurementAfterSuccessfulScan()
                 case .failure(let message):
                     host.showPlacementWarning(message, kind: .alert)
                 }
@@ -322,6 +338,7 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
         guard let host else { return }
         DispatchQueue.main.async {
             host.flattenScanInvalidateGeneration += 1
+            host.flattenScanOccludesPlacementChrome = false
             host.isFlattenScanActive = false
             host.flattenScanPreviewImage = nil
             host.flattenScanSigmas = []
