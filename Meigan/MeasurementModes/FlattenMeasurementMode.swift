@@ -137,54 +137,69 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
             return
         }
 
-        DispatchQueue.main.async { [weak self, weak host, weak arView] in
-            guard let self, let host, let arView else { return }
+        // Activate the scan overlay synchronously so the user sees instant feedback
+        // the moment they tap Start Scan. The preview image fills in once the AR
+        // snapshot completes; until then `FlattenScanPreviewOverlay` shows its chrome
+        // with the animated scanning beam.
+        host.flattenScanPreviewImage = nil
+        host.flattenScanResultImage = nil
+        host.flattenShapeFindings = []
+        host.flattenDetectionPreviewImage = nil
+        host.flattenScanSigmas = []
+        host.isFlattenScanActive = true
+        host.flattenScanOccludesPlacementChrome = true
+        host.suppressPlacementBannerChromeDuringFlattenPipelineHandoff()
 
-            host.suppressPlacementBannerChromeDuringFlattenPipelineHandoff()
-
-            host.beginFlattenScanSnapshotDecorations()
-            host.applyFlattenScanPreviewSnapshotVisibility()
-            arView.snapshot(saveToHDR: false) { previewFull in
-                DispatchQueue.main.async { [weak self, weak host, weak arView, previewFull] in
-                    guard let host else { return }
-                    guard let self, let arView else {
-                        host.flattenScanOccludesPlacementChrome = false
+        host.beginFlattenScanSnapshotDecorations()
+        host.applyFlattenScanPreviewSnapshotVisibility()
+        arView.snapshot(saveToHDR: false) { [weak self, weak host, weak arView] previewFull in
+            DispatchQueue.main.async { [weak self, weak host, weak arView, previewFull] in
+                guard let host else { return }
+                guard let self, let arView else {
+                    host.flattenScanOccludesPlacementChrome = false
+                    host.restoreFlattenScanSnapshotDecorations()
+                    host.isFlattenScanActive = false
+                    host.flattenScanPreviewImage = nil
+                    return
+                }
+                host.applyFlattenScanRawSnapshotVisibility()
+                arView.snapshot(saveToHDR: false) { [weak self, weak host, weak arView, previewFull] rawFull in
+                    DispatchQueue.main.async { [weak self, weak host, weak arView, previewFull] in
+                        guard let host else { return }
                         host.restoreFlattenScanSnapshotDecorations()
-                        return
-                    }
-                    host.applyFlattenScanRawSnapshotVisibility()
-                    arView.snapshot(saveToHDR: false) { rawFull in
-                        DispatchQueue.main.async { [weak self, weak host, weak arView, previewFull] in
-                            guard let host else { return }
-                            host.restoreFlattenScanSnapshotDecorations()
-                            guard let self, let arView else {
-                                host.flattenScanOccludesPlacementChrome = false
-                                return
-                            }
-                            guard let previewFull, let rawFull else {
-                                host.flattenScanOccludesPlacementChrome = false
-                                host.showPlacementWarning("Scan cancelled. Could not capture the AR view.", kind: .alert)
-                                return
-                            }
-                            let currentPoints = Array(self.flattenPlacedPoints().prefix(4))
-                            guard Self.pointsMatch(points, currentPoints),
-                                  self.allPointsVisible(currentPoints, in: arView)
-                            else {
-                                host.flattenScanOccludesPlacementChrome = false
-                                host.showPlacementWarning("Aim the camera so all 4 corners are visible, then tap Scan.", kind: .instruction)
-                                return
-                            }
-
-                            let previewImage = Self.croppedScanImage(from: previewFull, around: currentPoints, in: arView)
-                            self.beginScan(
-                                with: previewImage,
-                                sourceImage: rawFull,
-                                points: currentPoints,
-                                imagePlanePoints: imagePlanePoints,
-                                viewportSize: scanViewportSize,
-                                in: arView
-                            )
+                        guard let self, let arView else {
+                            host.flattenScanOccludesPlacementChrome = false
+                            host.isFlattenScanActive = false
+                            host.flattenScanPreviewImage = nil
+                            return
                         }
+                        guard let previewFull, let rawFull else {
+                            host.flattenScanOccludesPlacementChrome = false
+                            host.isFlattenScanActive = false
+                            host.flattenScanPreviewImage = nil
+                            host.showPlacementWarning("Scan cancelled. Could not capture the AR view.", kind: .alert)
+                            return
+                        }
+                        let currentPoints = Array(self.flattenPlacedPoints().prefix(4))
+                        guard Self.pointsMatch(points, currentPoints),
+                              self.allPointsVisible(currentPoints, in: arView)
+                        else {
+                            host.flattenScanOccludesPlacementChrome = false
+                            host.isFlattenScanActive = false
+                            host.flattenScanPreviewImage = nil
+                            host.showPlacementWarning("Aim the camera so all 4 corners are visible, then tap Scan.", kind: .instruction)
+                            return
+                        }
+
+                        let previewImage = Self.croppedScanImage(from: previewFull, around: currentPoints, in: arView)
+                        self.beginScan(
+                            with: previewImage,
+                            sourceImage: rawFull,
+                            points: currentPoints,
+                            imagePlanePoints: imagePlanePoints,
+                            viewportSize: scanViewportSize,
+                            in: arView
+                        )
                     }
                 }
             }
@@ -1347,9 +1362,13 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
 
         do {
             let mesh = try MeshResource.generate(from: [descriptor])
+            // iOS 17+ RealityKit can ignore `material.blending = .transparent(opacity:)`
+            // when the tint color is fully opaque; encode alpha directly on the tint so
+            // the fill is always translucent regardless of OS version.
+            let translucentTint = UIColor.systemTeal.withAlphaComponent(0.3)
             var material = UnlitMaterial()
-            material.color = .init(tint: .systemTeal)
-            material.blending = .transparent(opacity: .init(floatLiteral: 0.3))
+            material.color = .init(tint: translucentTint)
+            material.blending = .transparent(opacity: .init(floatLiteral: 1.0))
             return ModelEntity(mesh: mesh, materials: [material])
         } catch {
             arPlacementLog.warning("makeFlattenFillEntity: mesh generation failed: \(error.localizedDescription, privacy: .public)")

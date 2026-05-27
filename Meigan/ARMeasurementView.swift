@@ -198,8 +198,8 @@ struct ARMeasurementView: View {
                         )
                     }
 
-                    if let preview = flattenScanPreviewImage, isFlattenScanActive {
-                        FlattenScanPreviewOverlay(image: preview)
+                    if isFlattenScanActive {
+                        FlattenScanPreviewOverlay(image: flattenScanPreviewImage)
                     }
 
                     if let result = flattenScanResultImage, !isFlattenScanActive {
@@ -815,7 +815,7 @@ private struct FlattenWarpResultInspectOverlay: View {
 }
 
 private struct FlattenScanPreviewOverlay: View {
-    let image: UIImage
+    let image: UIImage?
     @State private var scanOffset: CGFloat = -0.45
 
     var body: some View {
@@ -847,11 +847,26 @@ private struct FlattenScanPreviewOverlay: View {
                             .multilineTextAlignment(.center)
 
                         ZStack {
-                            Image(uiImage: image)
-                                .resizable()
-                                .scaledToFill()
+                            if let image {
+                                Image(uiImage: image)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: previewWidth, height: previewHeight)
+                                    .clipped()
+                                    .transition(.opacity)
+                            } else {
+                                // Snapshot not yet ready — keep the chrome visible so the user
+                                // sees instant feedback the moment they tap Start Scan.
+                                LinearGradient(
+                                    colors: [
+                                        Color.black.opacity(0.55),
+                                        Color.black.opacity(0.35)
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
                                 .frame(width: previewWidth, height: previewHeight)
-                                .clipped()
+                            }
 
                             LinearGradient(
                                 colors: [
@@ -1180,6 +1195,7 @@ private struct OverlaysView: View {
                                 Image(systemName: "plus.circle.fill")
                                     .font(.system(size: 80, weight: .regular))
                                     .frame(width: 100, height: 100)
+                                    .contentShape(Circle())
                             }
                             .buttonStyle(.plain)
                             .disabled(!canPlaceMark)
@@ -1194,6 +1210,7 @@ private struct OverlaysView: View {
                                         .font(.headline.weight(.semibold))
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 12)
+                                        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                                 }
                                 .buttonStyle(.plain)
                                 .foregroundColor(.white)
@@ -1203,6 +1220,7 @@ private struct OverlaysView: View {
                                         : Color.white.opacity(0.22)
                                 )
                                 .clipShape(RoundedRectangle(cornerRadius: 16))
+                                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 16)
                                         .strokeBorder(Color.white.opacity(flattenScanCornersReady ? 0 : 0.35), lineWidth: 1)
@@ -1221,6 +1239,7 @@ private struct OverlaysView: View {
                                 Image(systemName: "camera.fill")
                                     .font(.system(size: 22, weight: .semibold))
                                     .frame(width: 56, height: 56)
+                                    .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                             }
                             .buttonStyle(.plain)
                             .disabled(trackingGuideActive || isFlattenScanActive)
@@ -1228,6 +1247,7 @@ private struct OverlaysView: View {
                             .padding(10)
                             .background(.thinMaterial)
                             .cornerRadius(20)
+                            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
 
                             Spacer()
                         }
@@ -1345,9 +1365,11 @@ private struct ARApplicationFooter: View {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(isSelected ? Color.white.opacity(0.12) : Color.clear)
             )
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
         .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
     }
 }
 
