@@ -135,6 +135,7 @@ struct ARSceneView: UIViewRepresentable {
     @Binding var activeTrackingReason: ARCamera.TrackingState.Reason?
     @Binding var trackingGuideMessage: String
     @Binding var trackingGuideKind: PlacementBannerKind
+    @Binding var identifyDetections: [IdentifyDetection]
 
     class Coordinator: NSObject, ARCoachingOverlayViewDelegate, ARSessionDelegate {
         @Binding var isCoachingActive: Bool
@@ -166,7 +167,8 @@ struct ARSceneView: UIViewRepresentable {
         @Binding var activeTrackingReason: ARCamera.TrackingState.Reason?
         @Binding var trackingGuideMessage: String
         @Binding var trackingGuideKind: PlacementBannerKind
-
+        @Binding var identifyDetections: [IdentifyDetection]
+        
         private var ringAnchor: AnchorEntity?
         private var ringEntity: ModelEntity?
 
@@ -211,6 +213,10 @@ struct ARSceneView: UIViewRepresentable {
             appliedMeasurementModeRaw == ARFooterFeature.flatten.rawValue
         }
 
+        private var isIdentifyMode: Bool {
+            appliedMeasurementModeRaw == ARFooterFeature.identify.rawValue
+        }
+
         // MARK: - Mode controllers
         //
         // Mode-specific decisions (placement semantics, pin candidates, per-frame previews,
@@ -219,8 +225,11 @@ struct ARSceneView: UIViewRepresentable {
         // freshest mode value (the `@Binding` itself can be stale — see `appliedMeasurementModeRaw`).
         lazy var rulerMode: RulerMeasurementMode = RulerMeasurementMode(host: self)
         lazy var flattenMode: FlattenMeasurementMode = FlattenMeasurementMode(host: self)
+        lazy var identifyMode: IdentifyMeasurementMode = IdentifyMeasurementMode(host: self)
         var currentMode: MeasurementModeBehavior {
-            isFlattenMode ? flattenMode : rulerMode
+            if isFlattenMode { return flattenMode }
+            if isIdentifyMode { return identifyMode }
+            return rulerMode
         }
 
         /// Last world position we fired an autolock haptic for (nil = unlocked).
@@ -372,7 +381,8 @@ struct ARSceneView: UIViewRepresentable {
             flattenRelocationActive: Binding<Bool>,
             activeTrackingReason: Binding<ARCamera.TrackingState.Reason?>,
             trackingGuideMessage: Binding<String>,
-            trackingGuideKind: Binding<PlacementBannerKind>
+            trackingGuideKind: Binding<PlacementBannerKind>,
+            identifyDetections: Binding<[IdentifyDetection]>
         ) {
             _isCoachingActive = isCoachingActive
             _isRelocalizing = isRelocalizing
@@ -398,6 +408,7 @@ struct ARSceneView: UIViewRepresentable {
             _activeTrackingReason = activeTrackingReason
             _trackingGuideMessage = trackingGuideMessage
             _trackingGuideKind = trackingGuideKind
+            _identifyDetections = identifyDetections
         }
 
         deinit {
@@ -819,6 +830,21 @@ struct ARSceneView: UIViewRepresentable {
                 let ct = currentFrame.camera.transform
                 let camForLabel = SIMD3<Float>(ct.columns.3.x, ct.columns.3.y, ct.columns.3.z)
                 let camUp = simd_normalize(SIMD3<Float>(ct.columns.1.x, ct.columns.1.y, ct.columns.1.z))
+
+                if self.isIdentifyMode {
+                    self.ringEntity?.isEnabled = false
+                    self.updatePlacementGuide(.none)
+                    self.updatePinAutolockHaptics(pinWorld: nil)
+                    self.latestPinAutolockWorld = nil
+                    self.lineMidHoverDotEntity?.isEnabled = false
+                    self.currentMode.updateAfterReticle(
+                        reticleWorld: .zero,
+                        camWorld: camForLabel,
+                        camUp: camUp
+                    )
+                    DispatchQueue.main.async { self.hasValidTarget = false }
+                    return
+                }
 
                 self.currentMode.resetAutolockBookkeepingIfNeeded()
                 if !self.committedSegments.isEmpty {
@@ -1571,6 +1597,10 @@ struct ARSceneView: UIViewRepresentable {
         }
 
         private func clearAllMeasurements() {
+            if !identifyDetections.isEmpty {
+                DispatchQueue.main.async { self.identifyDetections = [] }
+            }
+
             if isFlattenScanActive {
                 flattenScanInvalidateGeneration += 1
                 DispatchQueue.main.async {
@@ -1584,6 +1614,7 @@ struct ARSceneView: UIViewRepresentable {
                 }
                 return
             }
+            
 
             flattenScanInvalidateGeneration += 1
             committedSegments.removeAll()
@@ -2162,7 +2193,8 @@ struct ARSceneView: UIViewRepresentable {
             flattenRelocationActive: $flattenRelocationActive,
             activeTrackingReason: $activeTrackingReason,
             trackingGuideMessage: $trackingGuideMessage,
-            trackingGuideKind: $trackingGuideKind
+            trackingGuideKind: $trackingGuideKind,
+            identifyDetections: $identifyDetections
         )
     }
 
@@ -2258,6 +2290,7 @@ struct ARSceneView: UIViewRepresentable {
         trackingGuideShowThreshold: 6,
         activeTrackingReason: .constant(nil),
         trackingGuideMessage: .constant(""),
-        trackingGuideKind: .constant(.instruction)
+        trackingGuideKind: .constant(.instruction),
+        identifyDetections: .constant([])
     )
 }

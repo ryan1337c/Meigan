@@ -9,6 +9,7 @@ private let arMeasurementUILog = Logger(subsystem: Bundle.main.bundleIdentifier 
 enum ARFooterFeature: String {
     case ruler
     case flatten
+    case identify
 }
 
 struct ARMeasurementView: View {
@@ -56,6 +57,7 @@ struct ARMeasurementView: View {
     @State private var activeTrackingReason: ARCamera.TrackingState.Reason? = nil
     @State private var trackingGuideMessage: String = ""
     @State private var trackingGuideKind: PlacementBannerKind = .instruction
+    @State private var identifyDetections: [IdentifyDetection] = []
 
     // Simple trigger to recreate/reset the AR view
     @State private var arSessionResetID = UUID()
@@ -66,6 +68,8 @@ struct ARMeasurementView: View {
             return markCount > 0
         case .flatten:
             return flattenSegmentCount > 0
+        case .identify:
+            return false
         }
     }
 
@@ -114,11 +118,16 @@ struct ARMeasurementView: View {
                             trackingGuideShowThreshold: trackingGuideShowThreshold,
                             activeTrackingReason: $activeTrackingReason,
                             trackingGuideMessage: $trackingGuideMessage,
-                            trackingGuideKind: $trackingGuideKind
+                            trackingGuideKind: $trackingGuideKind,
+                            identifyDetections: $identifyDetections
                         )
                         .id(arSessionResetID)
                     } else {
                         Color.black.ignoresSafeArea()
+                    }
+
+                    if selectedFeature == .identify {
+                        IdentifyAnnotationOverlay(detections: identifyDetections)
                     }
 
                     OverlaysView(
@@ -472,6 +481,33 @@ private struct FlattenDetectionPreviewSheet: View {
     }
 }
 #endif
+
+struct IdentifyAnnotationOverlay: View {
+    let detections: [IdentifyDetection]
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(detections) { d in
+                ZStack(alignment: .topLeading) {
+                    Rectangle()
+                        .stroke(Color.green, lineWidth: 2)
+                        .frame(width: d.viewRect.width, height: d.viewRect.height)
+
+                    Text("\(d.label) \(Int(d.confidence * 100))%")
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Color.green)
+                        .foregroundColor(.black)
+                        .offset(y: -16)
+                }
+                .position(x: d.viewRect.midX, y: d.viewRect.midY)
+            }
+        }
+        .allowsHitTesting(false)   // so footer/buttons stay tappable
+        .ignoresSafeArea()         // match arView.bounds full-screen coords
+    }
+}
 
 /// Full-color warped result with SwiftUI vector box strokes aligned to `scaledToFit` letterboxing; tap maps to image pixels (smallest clipped bbox wins on overlap).
 private struct FlattenWarpResultInspectOverlay: View {
@@ -993,6 +1029,8 @@ private struct OverlayGuideBanner: View {
 
 // View for crosshair, buttons, etc.
 private struct OverlaysView: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
     let isCoachingActive: Bool
     let isRelocalizing: Bool
     let hasValidTarget: Bool
@@ -1024,7 +1062,18 @@ private struct OverlaysView: View {
         !trackingGuideMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var usesSideActionLayout: Bool {
+        if horizontalSizeClass == .regular {
+            return true
+        }
+        let screenBounds = UIScreen.main.bounds
+        return min(screenBounds.width, screenBounds.height) >= 700
+    }
+
     private var hintText: String {
+        if selectedFeature == .identify {
+            return ""
+        }
         if selectedFeature == .flatten && flattenRelocationActive {
             return "Corner selected, move to re adjust"
         }
@@ -1079,7 +1128,8 @@ private struct OverlaysView: View {
     var body: some View {
         ZStack {
             if !isCoachingActive {
-                if hasValidTarget, !trackingGuideActive, !isFlattenScanActive {
+                if selectedFeature != .identify,
+                   hasValidTarget, !trackingGuideActive, !isFlattenScanActive {
                     Circle()
                         .fill(Color.white)
                         .frame(width: 6, height: 6)
@@ -1158,100 +1208,31 @@ private struct OverlaysView: View {
                     Spacer()
 
                     VStack(spacing: 10) {
-                        // if selectedFeature == .flatten && flattenSegmentCount >= 3 && !flattenRelocationActive {
-                        //     VStack(spacing: 8) {
-                        //         Button {
-                        //             onStartScan()
-                        //         } label: {
-                        //             Label("Start Scan", systemImage: "viewfinder")
-                        //                 .font(.headline.weight(.semibold))
-                        //                 .frame(maxWidth: .infinity)
-                        //                 .padding(.vertical, 12)
-                        //         }
-                        //         .buttonStyle(.plain)
-                        //         .foregroundColor(.white)
-                        //         .background(
-                        //             flattenScanCornersReady
-                        //                 ? Color(red: 0.38, green: 0.58, blue: 0.92)
-                        //                 : Color.white.opacity(0.22)
-                        //         )
-                        //         .clipShape(RoundedRectangle(cornerRadius: 16))
-                        //         .overlay(
-                        //             RoundedRectangle(cornerRadius: 16)
-                        //                 .strokeBorder(Color.white.opacity(flattenScanCornersReady ? 0 : 0.35), lineWidth: 1)
-                        //         )
-                        //         .disabled(!flattenScanCornersReady)
-                        //         .opacity(flattenScanCornersReady ? 1 : 0.72)
-                        //     }
-                        //     .padding(.horizontal, 16)
-                        // }
-
-                        HStack(alignment: .center) {
-                            Spacer()
-
-                            Button {
-                                onPlaceMark()
-                            } label: {
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 80, weight: .regular))
-                                    .frame(width: 100, height: 100)
-                                    .contentShape(Circle())
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(!canPlaceMark)
-                            .opacity(canPlaceMark ? 1 : 0.45)
-
-                            if selectedFeature == .flatten && flattenSegmentCount >= 3 && !flattenRelocationActive {
-                                Spacer()
-                                Button {
-                                    onStartScan()
-                                } label: {
-                                    Label("Start Scan", systemImage: "viewfinder")
-                                        .font(.headline.weight(.semibold))
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 12)
-                                        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        if usesSideActionLayout {
+                            if showsStartScanButton {
+                                HStack {
+                                    Spacer()
+                                    startScanButton
+                                    Spacer()
                                 }
-                                .buttonStyle(.plain)
-                                .foregroundColor(.white)
-                                .background(
-                                    flattenScanCornersReady
-                                        ? Color(red: 0.38, green: 0.58, blue: 0.92)
-                                        : Color.white.opacity(0.22)
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: 16))
-                                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 16)
-                                        .strokeBorder(Color.white.opacity(flattenScanCornersReady ? 0 : 0.35), lineWidth: 1)
-                                )
-                                .disabled(!flattenScanCornersReady || isFlattenScanActive)
-                                .opacity(
-                                    flattenScanCornersReady && !isFlattenScanActive ? 1 : 0.72
-                                )
+                                .padding(.horizontal, 16)
                             }
+                        } else {
+                            HStack(alignment: .center) {
+                                Spacer()
+                                placeMarkButton
 
-                            Spacer()
+                                if showsStartScanButton {
+                                    Spacer()
+                                    startScanButton
+                                }
 
-                            Button {
-                                onScreenshot()
-                            } label: {
-                                Image(systemName: "camera.fill")
-                                    .font(.system(size: 22, weight: .semibold))
-                                    .frame(width: 56, height: 56)
-                                    .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                                Spacer()
+                                screenshotButton
+                                Spacer()
                             }
-                            .buttonStyle(.plain)
-                            .disabled(trackingGuideActive || isFlattenScanActive)
-                            .opacity((trackingGuideActive || isFlattenScanActive) ? 0.45 : 1)
-                            .padding(10)
-                            .background(.thinMaterial)
-                            .cornerRadius(20)
-                            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-
-                            Spacer()
+                            .padding(.horizontal, 16)
                         }
-                        .padding(.horizontal, 16)
                     }
                     .padding(.bottom, 8)
                 }
@@ -1277,6 +1258,15 @@ private struct OverlaysView: View {
                         .ignoresSafeArea(edges: [.horizontal, .bottom])
                     }
                 }
+
+                if usesSideActionLayout {
+                    VStack(spacing: 16) {
+                        screenshotButton
+                        placeMarkButton
+                    }
+                    .padding(.trailing, 28)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                }
             }
         }
         .foregroundColor(.white)
@@ -1284,7 +1274,76 @@ private struct OverlaysView: View {
         .onPreferenceChange(ARFooterHeightPreferenceKey.self, perform: onFooterHeightChange)
     }
 
+    private var showsStartScanButton: Bool {
+        selectedFeature == .flatten && flattenSegmentCount >= 3 && !flattenRelocationActive
+    }
+
+    @ViewBuilder
+    private var placeMarkButton: some View {
+        if selectedFeature != .identify {
+            Button {
+                onPlaceMark()
+            } label: {
+                Image(systemName: "plus.circle.fill")
+                    .font(.system(size: 80, weight: .regular))
+                    .frame(width: 100, height: 100)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!canPlaceMark)
+            .opacity(canPlaceMark ? 1 : 0.45)
+        }
+    }
+
+    private var screenshotButton: some View {
+        Button {
+            onScreenshot()
+        } label: {
+            Image(systemName: "camera.fill")
+                .font(.system(size: 22, weight: .semibold))
+                .frame(width: 56, height: 56)
+                .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(trackingGuideActive || isFlattenScanActive)
+        .opacity((trackingGuideActive || isFlattenScanActive) ? 0.45 : 1)
+        .padding(10)
+        .background(.thinMaterial)
+        .cornerRadius(20)
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    private var startScanButton: some View {
+        Button {
+            onStartScan()
+        } label: {
+            Label("Start Scan", systemImage: "viewfinder")
+                .font(.headline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(.white)
+        .background(
+            flattenScanCornersReady
+                ? Color(red: 0.38, green: 0.58, blue: 0.92)
+                : Color.white.opacity(0.22)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(Color.white.opacity(flattenScanCornersReady ? 0 : 0.35), lineWidth: 1)
+        )
+        .disabled(!flattenScanCornersReady || isFlattenScanActive)
+        .opacity(
+            flattenScanCornersReady && !isFlattenScanActive ? 1 : 0.72
+        )
+    }
+
     private var canPlaceMark: Bool {
+        guard selectedFeature != .identify else { return false }
         guard hasValidTarget, !trackingGuideActive, !isFlattenScanActive else { return false }
         return true
     }
@@ -1326,6 +1385,17 @@ private struct ARApplicationFooter: View {
                 isSelected: selectedFeature == .flatten
             ) {
                 onSelectFeature(.flatten)
+            }
+            .frame(maxWidth: .infinity)
+            .disabled(interactionLockedDuringFlattenScan)
+            .opacity(interactionLockedDuringFlattenScan ? 0.45 : 1)
+
+            footerFeatureButton(
+                title: "Identify",
+                systemImage: "viewfinder.circle",
+                isSelected: selectedFeature == .identify
+            ) {
+                onSelectFeature(.identify)
             }
             .frame(maxWidth: .infinity)
             .disabled(interactionLockedDuringFlattenScan)
