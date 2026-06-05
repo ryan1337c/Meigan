@@ -72,7 +72,7 @@ final class IdentifyDetector {
             guard conf >= confidenceThreshold else { continue }
             let cls = Int(val(i, 5))
             guard cls >= 0, cls < classNames.count else { continue }
-            // 
+            // Normalize the bounding box coordinates to the image size
             let x1 = val(i, 0) / imgSize, y1 = val(i, 1) / imgSize
             let x2 = val(i, 2) / imgSize, y2 = val(i, 3) / imgSize
             let rect = CGRect(x: CGFloat(min(x1, x2)),

@@ -68,6 +68,7 @@ struct HomeView: View {
 
                 ProfileAvatarMenu(
                     initial: profileInitial,
+                    isGuest: appSession.isGuest,
                     onAccount: { showAccount = true },
                     onSettings: { showSettings = true },
                     onLogOut: { appSession.logOut() }
@@ -100,6 +101,7 @@ struct HomeView: View {
 
 private struct ProfileAvatarMenu: View {
     let initial: String
+    let isGuest: Bool
     let onAccount: () -> Void
     let onSettings: () -> Void
     let onLogOut: () -> Void
@@ -113,8 +115,15 @@ private struct ProfileAvatarMenu: View {
                 Label("Settings", systemImage: "gearshape")
             }
             Divider()
-            Button(role: .destructive) { onLogOut() } label: {
-                Label("Log Out", systemImage: "rectangle.portrait.and.arrow.right")
+            if isGuest {
+                Button { onLogOut() } label: {
+                    Label("Sign In", systemImage: "person.crop.circle.badge.plus")
+                }
+                .tint(.accentColor)
+            } else {
+                Button(role: .destructive) { onLogOut() } label: {
+                    Label("Log Out", systemImage: "rectangle.portrait.and.arrow.right")
+                }
             }
         } label: {
             AvatarBadge(initial: initial)

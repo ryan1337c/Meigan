@@ -126,7 +126,7 @@ struct ARMeasurementView: View {
                         Color.black.ignoresSafeArea()
                     }
 
-                    if selectedFeature == .identify {
+                    if selectedFeature == .identify, !isCoachingActive {
                         IdentifyAnnotationOverlay(detections: identifyDetections)
                     }
 
@@ -145,6 +145,7 @@ struct ARMeasurementView: View {
                         trackingGuideKind: trackingGuideKind,
                         photoSavedBannerMessage: photoSavedBannerMessage,
                         profileInitial: profileInitial,
+                        isGuest: appSession.isGuest,
                         hasPinnedPoints: hasPinnedMeasurementPoints,
                         onBack: { dismiss() },
                         onStartScan: {
@@ -287,6 +288,11 @@ struct ARMeasurementView: View {
         .onChange(of: showSettings) { showing in
             if showing { isARSessionActive = false }
             else if scenePhase == .active && !showAccount { isARSessionActive = true }
+        }
+        .onChange(of: isCoachingActive) { active in
+            if active {
+                identifyDetections = []
+            }
         }
     }
 
@@ -1046,6 +1052,7 @@ private struct OverlaysView: View {
     /// When set, top guidance is hidden and this banner occupies that slot (e.g. after Save to Photos).
     let photoSavedBannerMessage: String?
     let profileInitial: String
+    let isGuest: Bool
     let hasPinnedPoints: Bool
     let onBack: () -> Void
     let onStartScan: () -> Void
@@ -1239,6 +1246,7 @@ private struct OverlaysView: View {
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     ARApplicationFooter(
                         profileInitial: profileInitial,
+                        isGuest: isGuest,
                         selectedFeature: selectedFeature,
                         interactionLockedDuringFlattenScan: isFlattenScanActive,
                         onSelectFeature: onSelectFeature,
@@ -1359,6 +1367,7 @@ private struct ARFooterHeightPreferenceKey: PreferenceKey {
 
 private struct ARApplicationFooter: View {
     let profileInitial: String
+    let isGuest: Bool
     let selectedFeature: ARFooterFeature
     let interactionLockedDuringFlattenScan: Bool
     let onSelectFeature: (ARFooterFeature) -> Void
@@ -1403,6 +1412,7 @@ private struct ARApplicationFooter: View {
 
             ARProfileAvatarMenu(
                 initial: profileInitial,
+                isGuest: isGuest,
                 onAccount: onAccount,
                 onSettings: onSettings,
                 onLogOut: onLogOut
@@ -1445,6 +1455,7 @@ private struct ARApplicationFooter: View {
 
 private struct ARProfileAvatarMenu: View {
     let initial: String
+    let isGuest: Bool
     let onAccount: () -> Void
     let onSettings: () -> Void
     let onLogOut: () -> Void
@@ -1458,8 +1469,15 @@ private struct ARProfileAvatarMenu: View {
                 Label("Settings", systemImage: "gearshape")
             }
             Divider()
-            Button(role: .destructive) { onLogOut() } label: {
-                Label("Log Out", systemImage: "rectangle.portrait.and.arrow.right")
+            if isGuest {
+                Button { onLogOut() } label: {
+                    Label("Sign In", systemImage: "person.crop.circle.badge.plus")
+                }
+                .tint(.accentColor)
+            } else {
+                Button(role: .destructive) { onLogOut() } label: {
+                    Label("Log Out", systemImage: "rectangle.portrait.and.arrow.right")
+                }
             }
         } label: {
             ZStack {

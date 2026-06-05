@@ -45,7 +45,7 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
             let mapped = self.mapToView(raw, frame: frame,
                                         orientation: uiOrientation, viewport: viewport)
             DispatchQueue.main.async {
-                guard host.currentMode === self else { return }   // still in Identify
+                guard host.currentMode === self, !host.isCoachingActive else { return }   // still in Identify
                 host.identifyDetections = mapped
             }
         }

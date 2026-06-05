@@ -116,9 +116,6 @@ struct LoginView: View {
 
                 // Divider
                 VStack(spacing: 18) {
-                    Text("Don't have an account?")
-                        .font(.subheadline.weight(.semibold))
-
                     // Continue as guest
                     Button {
                         appSession.continueAsGuest()
@@ -131,14 +128,17 @@ struct LoginView: View {
                     .foregroundColor(.primary)
                     .overlay(Capsule().stroke(Color.primary, lineWidth: 1.5))
 
-                    // Create account link
-                    NavigationLink {
-                        RegisterView()
-                    } label: {
-                        Text("Create account")
+                    HStack(spacing: 4) {
+                        Text("Don't have an account?")
                             .font(.subheadline)
-                            .underline()
-                            .foregroundColor(.accentColor)
+                            .foregroundColor(Color(UIColor.secondaryLabel))
+                        NavigationLink {
+                            RegisterView()
+                        } label: {
+                            Text("Create account")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundColor(.accentColor)
+                        }
                     }
                 }
 
