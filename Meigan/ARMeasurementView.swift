@@ -503,7 +503,7 @@ struct IdentifyAnnotationOverlay: View {
                         .font(.caption2.weight(.semibold))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
-                        .background(Color.green)
+                        .background(Color.green, ignoresSafeAreaEdges: [])
                         .foregroundColor(.black)
                         .offset(y: -16)
                 }

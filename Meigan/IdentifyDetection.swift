@@ -1,7 +1,22 @@
 import CoreGraphics
+import OSLog
+
+enum IdentifyPipelineDebug {
+    static let log = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "Meigan",
+        category: "IdentifyPipeline"
+    )
+}
+
+struct IdentifyTrack {
+    let id: UUID 
+    var label: String
+    var confidence: Float
+    var viewRect: CGRect
+}
 
 struct IdentifyDetection: Identifiable, Equatable {
-    let id: Int // Index within the current cycle, for SwiftUI diffing
+    let id: UUID
     let label: String
     let confidence: Float
     let viewRect: CGRect

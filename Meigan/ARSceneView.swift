@@ -1597,6 +1597,7 @@ struct ARSceneView: UIViewRepresentable {
         }
 
         private func clearAllMeasurements() {
+            identifyMode.resetTracks()
             if !identifyDetections.isEmpty {
                 DispatchQueue.main.async { self.identifyDetections = [] }
             }
