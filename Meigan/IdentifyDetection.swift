@@ -13,6 +13,9 @@ struct IdentifyTrack {
     var label: String
     var confidence: Float
     var viewRect: CGRect
+    /// Consecutive inference frames this track went unmatched. Tracks "coast" at their
+    /// last known rect while this is below the grace threshold, then are removed.
+    var missFrames: Int = 0
 }
 
 struct IdentifyDetection: Identifiable, Equatable {

@@ -17,6 +17,21 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
     // Grace period to cache the detection results to prevent flickering when the detection results are not available
     private var tracks: [IdentifyTrack] = []
     private let matchIoUThreshold: CGFloat = 0.3
+    /// Looser IoU used when matching a coasting track (one that missed recent frames),
+    /// so a re-detected object re-attaches to its existing track instead of spawning a new one.
+    private let coastingMatchIoUThreshold: CGFloat = 0.1
+    /// A coasting track and a fresh detection are treated as the same object when their
+    /// centers are within this fraction of the larger box dimension (used to suppress duplicates).
+    private let coastingCenterDistanceFactor: CGFloat = 0.75
+    /// Number of consecutive missed inference frames a track survives before removal
+    /// (~0.3 s at the ~10 Hz detection cadence).
+    private let maxMissFrames = 3
+    /// A detection is dropped unless at least this fraction of its box area falls inside the
+    /// drawable region (viewport minus safe zones, and excluding any off-screen cropped part).
+    private let minVisibleFractionInView: CGFloat = 0.5
+    /// Extra inset (points) added to the system safe-area insets when defining the drawable
+    /// region (status bar / notch / home-indicator chrome).
+    private let safeZoneExtraInset: CGFloat = 0
     private var detectionGeneration = 0
 
     init(host: ARSceneView.Coordinator) { self.host = host }
@@ -50,6 +65,8 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
         let uiOrientation = Self.interfaceOrientation(in: arView)
         let cgOrientation = Self.cgOrientation(for: uiOrientation)
         let viewport = arView.bounds.size
+        // Read on the main/scene-update thread; passed into the background mapping closure.
+        let safeAreaInsets = arView.safeAreaInsets
         let pixelBuffer = frame.capturedImage
         pipelineDebugFrameID += 1
         let debugFrameID = pipelineDebugFrameID
@@ -66,6 +83,7 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
                 frame: frame,
                 orientation: uiOrientation,
                 viewport: viewport,
+                safeAreaInsets: safeAreaInsets,
                 debugFrameID: debugFrameID
             )
             DispatchQueue.main.async {
@@ -80,11 +98,16 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
     private func updateTracks(with detections: [IdentifyDetection]) -> [IdentifyDetection] {
         var unmatchedDetectionIndices = Set(detections.indices)
         var updatedTracks: [IdentifyTrack] = []
+        // Tracks kept this frame without a match (coasting). Used to suppress duplicate
+        // boxes when an unmatched detection is plausibly one of these same objects.
+        var coastingTracks: [IdentifyTrack] = []
 
-        // 1) Try to match existing tracks (prefer highest IoU)
+        // 1) Match existing tracks to detections (prefer highest IoU). Coasting tracks
+        //    use a looser threshold so a re-detected object re-attaches to its track.
         for var track in tracks {
+            let threshold = track.missFrames > 0 ? coastingMatchIoUThreshold : matchIoUThreshold
             var bestIdx: Int?
-            var bestIoU: CGFloat = matchIoUThreshold
+            var bestIoU: CGFloat = threshold
 
             for idx in unmatchedDetectionIndices {
                 let det = detections[idx]
@@ -101,19 +124,34 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
                 track.label = det.label
                 track.confidence = det.confidence
                 track.viewRect = det.viewRect
+                track.missFrames = 0
                 updatedTracks.append(track)
                 unmatchedDetectionIndices.remove(idx)
-            } 
+            } else {
+                // 2) Unmatched track → coast at its last rect. Drop once it exceeds the grace period.
+                track.missFrames += 1
+                if track.missFrames <= maxMissFrames {
+                    updatedTracks.append(track)
+                    coastingTracks.append(track)
+                }
+            }
         }
 
-        // 2) New detections → new tracks
+        // 3) Unmatched detections → new tracks, unless a coasting track of the same label
+        //    could plausibly be the same object (prevents a duplicate box appearing next to
+        //    the coasting one when matching narrowly failed in step 1).
         for idx in unmatchedDetectionIndices {
             let det = detections[idx]
+            let plausiblyExisting = coastingTracks.contains { track in
+                track.label == det.label && couldBeSameObject(track.viewRect, det.viewRect)
+            }
+            guard !plausiblyExisting else { continue }
             updatedTracks.append(IdentifyTrack(
                 id: UUID(),
                 label: det.label,
                 confidence: det.confidence,
                 viewRect: det.viewRect,
+                missFrames: 0
             ))
         }
 
@@ -123,7 +161,20 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
             IdentifyDetection(id: $0.id, label: $0.label,
                             confidence: $0.confidence, viewRect: $0.viewRect)
         }
-    }   
+    }
+
+    /// Looser-than-IoU sameness test used only to suppress duplicate new tracks against a
+    /// coasting track: any overlap, or centers within `coastingCenterDistanceFactor` of the
+    /// larger box dimension, counts as "could be the same object".
+    private func couldBeSameObject(_ a: CGRect, _ b: CGRect) -> Bool {
+        if iou(a, b) > 0 { return true }
+        let dx = a.midX - b.midX
+        let dy = a.midY - b.midY
+        let distance = (dx * dx + dy * dy).squareRoot()
+        let reference = max(a.width, a.height, b.width, b.height)
+        guard reference > 0 else { return false }
+        return distance < reference * coastingCenterDistanceFactor
+    }
 
     private func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
         let intersection = a.intersection(b)
@@ -151,6 +202,7 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
         frame: ARFrame,
         orientation: UIInterfaceOrientation,
         viewport: CGSize,
+        safeAreaInsets: UIEdgeInsets,
         debugFrameID: Int
     ) -> [IdentifyDetection] {
         guard viewport.width > 0, viewport.height > 0 else { return [] }
@@ -170,8 +222,18 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
         let offsetX = (viewport.width - displayedWidth) / 2
         let offsetY = (viewport.height - displayedHeight) / 2
 
+        // Drawable region = viewport minus the system safe-area insets (status bar / notch /
+        // home indicator chrome), shrunk further by `safeZoneExtraInset`. The portion of a box
+        // inside this region is what's actually visible to the user.
+        let drawableRect = CGRect(
+            x: safeAreaInsets.left,
+            y: safeAreaInsets.top,
+            width: viewport.width - safeAreaInsets.left - safeAreaInsets.right,
+            height: viewport.height - safeAreaInsets.top - safeAreaInsets.bottom
+        ).insetBy(dx: safeZoneExtraInset, dy: safeZoneExtraInset)
+
         let debugIndex = raw.indices.max(by: { raw[$0].confidence < raw[$1].confidence })
-        return raw.enumerated().map { idx, d in
+        return raw.enumerated().compactMap { idx, d -> IdentifyDetection? in
             let box = d.boxNormalized
             let viewRect = CGRect(
                 x: box.minX * displayedWidth + offsetX,
@@ -179,6 +241,13 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
                 width: box.width * displayedWidth,
                 height: box.height * displayedHeight
             )
+
+            // Drop the detection unless at least `minVisibleFractionInView` of the box lies in
+            // the drawable region (covers both safe-zone chrome and off-screen cropped edges).
+            let totalArea = viewRect.width * viewRect.height
+            let visible = viewRect.intersection(drawableRect)
+            let visibleArea = visible.isNull ? 0 : visible.width * visible.height
+            guard totalArea > 0, visibleArea / totalArea >= minVisibleFractionInView else { return nil }
 
             #if DEBUG
             if idx == debugIndex {
