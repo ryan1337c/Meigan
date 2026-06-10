@@ -34,6 +34,8 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
     private let safeZoneExtraInset: CGFloat = 0
     private var detectionGeneration = 0
 
+    private let maxDisplayedDetections = 10
+
     init(host: ARSceneView.Coordinator) { self.host = host }
 
     func pinCandidates() -> [SIMD3<Float>] { [] }
@@ -72,6 +74,7 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
         let debugFrameID = pipelineDebugFrameID
         
         let generation = detectionGeneration
+        let camWorldForScoring = camWorld
         detector.detect(
             pixelBuffer: pixelBuffer,
             orientation: cgOrientation,
@@ -89,7 +92,26 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
             DispatchQueue.main.async {
                 guard generation == self.detectionGeneration else { return }
                 guard host.currentMode === self, !host.isCoachingActive else { return }   // still in Identify
-                let displayed = self.updateTracks(with: mapped)
+
+                let drawableRect = Self.drawableRect(
+                    viewport: viewport,
+                    safeAreaInsets: safeAreaInsets,
+                    extraInset: self.safeZoneExtraInset
+                )
+
+                let scored = self.applyScores(
+                    to: mapped,
+                    drawableRect: drawableRect,
+                    camWorld: camWorldForScoring,
+                    arView: arView
+                )
+
+                let topScored = self.topDetections(scored, limit: self.maxDisplayedDetections)
+
+                let displayed = self.topDetections(
+                    self.updateTracks(with: topScored),
+                    limit: self.maxDisplayedDetections
+                )
                 host.identifyDetections = displayed
             }
         }
@@ -125,6 +147,9 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
                 track.confidence = det.confidence
                 track.viewRect = det.viewRect
                 track.missFrames = 0
+                track.centralityNormalized = det.centralityNormalized
+                track.proximityNormalized = det.proximityNormalized
+                track.score = det.score
                 updatedTracks.append(track)
                 unmatchedDetectionIndices.remove(idx)
             } else {
@@ -159,7 +184,10 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
 
         return tracks.map {
             IdentifyDetection(id: $0.id, label: $0.label,
-                            confidence: $0.confidence, viewRect: $0.viewRect)
+                            confidence: $0.confidence, viewRect: $0.viewRect,
+                            centralityNormalized: $0.centralityNormalized,
+                            proximityNormalized: $0.proximityNormalized,
+                            score: $0.score)
         }
     }
 
@@ -174,6 +202,89 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
         let reference = max(a.width, a.height, b.width, b.height)
         guard reference > 0 else { return false }
         return distance < reference * coastingCenterDistanceFactor
+    }
+
+    // Drawable region = viewport minus the system safe-area insets (status bar / notch /
+    // home indicator chrome), shrunk further by `safeZoneExtraInset`. The portion of a box
+    // inside this region is what's actually visible to the user.
+    private static func drawableRect(
+        viewport: CGSize,
+        safeAreaInsets: UIEdgeInsets,
+        extraInset: CGFloat
+    ) -> CGRect {
+        CGRect(
+            x: safeAreaInsets.left,
+            y: safeAreaInsets.top,
+            width: viewport.width - safeAreaInsets.left - safeAreaInsets.right,
+            height: viewport.height - safeAreaInsets.top - safeAreaInsets.bottom
+        ).insetBy(dx: extraInset, dy: extraInset)
+    }
+
+    // Distance from camera frame to target in meters.
+    private func raycastDistance(
+        from screenPoint: CGPoint,
+        camWorld: SIMD3<Float>,
+        arView: ARView
+    ) -> Float? {
+        let query: ARRaycastQuery?
+        if let q = arView.makeRaycastQuery(from: screenPoint, allowing: .existingPlaneGeometry, alignment: .any) {
+            query = q
+        } else {
+            query = arView.makeRaycastQuery(from: screenPoint, allowing: .estimatedPlane, alignment: .any)
+        }
+        guard let query, let hit = arView.session.raycast(query).first else { return nil }
+        let hitPos = SIMD3<Float>(
+            hit.worldTransform.columns.3.x,
+            hit.worldTransform.columns.3.y,
+            hit.worldTransform.columns.3.z
+        )
+        return simd_distance(hitPos, camWorld)
+    }
+
+    private func applyScores(
+        to detections: [IdentifyDetection],
+        drawableRect: CGRect,
+        camWorld: SIMD3<Float>,
+        arView: ARView
+    ) -> [IdentifyDetection] {
+        detections.map { det in
+            let centrality = IdentifyScoring.centrality(viewRect: det.viewRect, drawableRect: drawableRect)
+            let proximity: CGFloat
+            if let meters = raycastDistance(
+                from: CGPoint(x: det.viewRect.midX, y: det.viewRect.midY),
+                camWorld: camWorld,
+                arView: arView
+            ) {
+                proximity = IdentifyScoring.proximity(distanceMeters: meters)
+            } else {
+                proximity = 0
+            }
+            let score = IdentifyScoring.score(
+                confidence: det.confidence,
+                centrality: centrality,
+                proximity: proximity
+            )
+            return IdentifyDetection(
+                id: det.id,
+                label: det.label,
+                confidence: det.confidence,
+                viewRect: det.viewRect,
+                centralityNormalized: centrality,
+                proximityNormalized: proximity,
+                score: score
+            )
+        }
+    }
+
+    private func topDetections(_ detections: [IdentifyDetection], limit: Int) -> [IdentifyDetection] {
+        return detections
+            .sorted{
+                if $0.score != $1.score { return $0.score > $1.score }
+                if $0.confidence != $1.confidence { return $0.confidence > $1.confidence }
+                return $0.id.uuidString < $1.id.uuidString // stable tie breaking
+            }
+            .prefix(limit)
+            .map { $0 }
     }
 
     private func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
@@ -225,12 +336,11 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
         // Drawable region = viewport minus the system safe-area insets (status bar / notch /
         // home indicator chrome), shrunk further by `safeZoneExtraInset`. The portion of a box
         // inside this region is what's actually visible to the user.
-        let drawableRect = CGRect(
-            x: safeAreaInsets.left,
-            y: safeAreaInsets.top,
-            width: viewport.width - safeAreaInsets.left - safeAreaInsets.right,
-            height: viewport.height - safeAreaInsets.top - safeAreaInsets.bottom
-        ).insetBy(dx: safeZoneExtraInset, dy: safeZoneExtraInset)
+        let drawableRect = Self.drawableRect(
+            viewport: viewport,
+            safeAreaInsets: safeAreaInsets,
+            extraInset: safeZoneExtraInset
+        )
 
         let debugIndex = raw.indices.max(by: { raw[$0].confidence < raw[$1].confidence })
         return raw.enumerated().compactMap { idx, d -> IdentifyDetection? in
@@ -261,7 +371,8 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
             #endif
 
             return IdentifyDetection(id: UUID(), label: d.label,
-                                     confidence: d.confidence, viewRect: viewRect)
+                                     confidence: d.confidence, viewRect: viewRect,
+                                     centralityNormalized: 0, proximityNormalized: 0, score: 0)
         }
     }
 
