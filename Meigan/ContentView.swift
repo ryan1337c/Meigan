@@ -10,13 +10,15 @@ import Supabase
 
 struct ContentView: View {
     /// Set to `false` before shipping so onboarding only runs once (uses `hasCompletedOnboarding`).
-    private let alwaysShowOnboardingAtLaunch = true
+    private let alwaysShowOnboardingAtLaunch = false
 
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     /// When `alwaysShowOnboardingAtLaunch` is true, resets each cold launch so onboarding shows every time.
     @State private var onboardingDismissedThisSession = false
 
     @EnvironmentObject private var appSession: AppSession
+
+    @EnvironmentObject private var subscriptions: SubscriptionManager
 
     private var showOnboarding: Bool {
         if alwaysShowOnboardingAtLaunch {
@@ -38,12 +40,38 @@ struct ContentView: View {
                 NavigationStack {
                     LoginView()
                 }
+            } else if subscriptions.shouldPresentPaywall {
+                SubscriptionPaywallView(
+                    priceLabel: subscriptions.proPriceLabel,
+                    isPurchasing: subscriptions.isPurchasing,
+                    errorMessage: subscriptions.purchaseError,
+                    onSkip: {
+                        subscriptions.skipPaywall()
+                    },
+                    onSelectPro: {
+                        Task { await subscriptions.upgradeToPro() }
+                    }
+                )
+                .task { await subscriptions.loadProductsIfNeeded() }
             } else {
                 NavigationStack {
                     HomeView()
                         .navigationTitle("")
                         .navigationBarTitleDisplayMode(.inline)
                 }
+                // SubscriptionPaywallView(
+                //     priceLabel: subscriptions.proPriceLabel,
+                //     isPurchasing: subscriptions.isPurchasing,
+                //     errorMessage: subscriptions.purchaseError,
+                //     onSkip: {
+                //         subscriptions.skipPaywall()
+                //     },
+                //     onSelectPro: {
+                //         Task { await subscriptions.upgradeToPro() }
+                //     }
+                // )
+                // .task { await subscriptions.loadProductsIfNeeded() }
+
             }
         }
     }
@@ -53,4 +81,5 @@ struct ContentView: View {
     ContentView()
         .environmentObject(AppSession())
         .environmentObject(SettingsManager())
+        .environmentObject(SubscriptionManager())
 }

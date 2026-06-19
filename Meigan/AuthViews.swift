@@ -149,6 +149,13 @@ struct LoginView: View {
         .scrollIndicators(.hidden)
         .background(Color(.systemGroupedBackground))
         .navigationBarTitleDisplayMode(.inline)
+        .onDisappear {
+            email = ""
+            password = ""
+            isPasswordVisible = false
+            errorMessage = nil
+            isLoading = false
+        }
         #if DEBUG
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -177,9 +184,9 @@ struct LoginView: View {
             } catch {
                 await MainActor.run {
                     errorMessage = userFacingMessage(from: error)
+                    isLoading = false
                 }
             }
-            await MainActor.run { isLoading = false }
         }
     }
 }
@@ -369,6 +376,16 @@ struct RegisterView: View {
             errorMessage = nil
             showCheckEmailBanner = false
             dismiss()
+        }
+        .onDisappear {
+            firstName = ""
+            lastName = ""
+            email = ""
+            password = ""
+            isPasswordVisible = false
+            errorMessage = nil
+            isLoading = false
+            showCheckEmailBanner = false
         }
     }
 

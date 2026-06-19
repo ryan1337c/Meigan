@@ -38,7 +38,7 @@ final class AppSession: ObservableObject {
 
     init() {
         isGuest = UserDefaults.standard.bool(forKey: Self.guestKey)
-        isAuthenticated = supabase.auth.currentSession != nil
+        isAuthenticated = false
         listenForAuthChanges()
     }
 
@@ -78,12 +78,18 @@ final class AppSession: ObservableObject {
                     // refreshes it in the background and emits `.tokenRefreshed`
                     // (or `.signedOut`) next, where the sync runs.
                 case .tokenRefreshed:
-                    isAuthenticated = true
                     // Only sync if we haven't already this launch — covers the
                     // expired-initial-session case without re-fetching (and
                     // clobbering local edits) on routine periodic refreshes.
                     if !hasSyncedThisLaunch {
-                        await syncManagers()
+                        isGuest = false
+                        let synced = await syncManagers()
+                        if synced {
+                            isAuthenticated = true
+                        }
+                    }
+                    else {
+                        isAuthenticated = true
                     }
                 case .signedOut:
                     isAuthenticated = false
@@ -97,29 +103,38 @@ final class AppSession: ObservableObject {
     }
 
     private func activateAuthenticatedSession() async {
-        isAuthenticated = true
         isGuest = false
         UserDefaults.standard.set(false, forKey: Self.guestKey)
-        await syncManagers()
+        let synced = await syncManagers()
+        if synced {
+            isAuthenticated = true
+        }
     }
 
     /// Pulls settings/subscription from the cloud. If the managers aren't
     /// injected yet, defers until they are (see `flushPendingSyncIfNeeded`).
-    private func syncManagers() async {
+    @discardableResult
+    private func syncManagers() async -> Bool {
         guard let settingsManager, let subscriptionManager else {
             pendingAuthenticatedSync = true
-            return
+            return false
         }
         pendingAuthenticatedSync = false
         hasSyncedThisLaunch = true
         await settingsManager.syncFromCloud()
         await subscriptionManager.handleSignIn()
+        return true
     }
 
     private func flushPendingSyncIfNeeded() {
         guard pendingAuthenticatedSync,
               settingsManager != nil,
               subscriptionManager != nil else { return }
-        Task { await syncManagers() }
+        Task { 
+            let synced = await syncManagers() 
+            if synced {
+                isAuthenticated = true
+            }
+        }
     }
 }
