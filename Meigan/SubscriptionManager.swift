@@ -49,6 +49,9 @@ final class SubscriptionManager: ObservableObject {
     @Published private(set) var purchaseError: String?
     @Published private(set) var proPriceLabel: String?
 
+    // StoreKitPurchaseService is injected by MeiganApp
+    private var purchaseService: StoreKitPurchaseService?
+
     // MARK: - Init
 
     init() {
@@ -69,8 +72,6 @@ final class SubscriptionManager: ObservableObject {
         let outcome = await resolveSignInOutcome(userId: userId)
 
         shouldPresentPaywall = SubscriptionPaywallPolicy.shouldPresent(outcome: outcome)
-
-        await reconcileWithStoreKit()
     }
 
     /// Called by AppSession on `.signedOut` or guest mode.
@@ -81,9 +82,35 @@ final class SubscriptionManager: ObservableObject {
         isPurchasing = false
     }
 
-    // MARK: - Upgrade / Downgrade
+    @Published private(set) var isRestoring: Bool = false
+    @Published private(set) var restoreMessager: String?
 
-    private var purchaseService: StoreKitPurchaseService?
+    func restorePurchases() async {
+        purchaseError = nil
+        restoreMessager = nil
+        isRestoring = true
+        defer { isRestoring = false }
+
+        guard let purchaseService else { return }
+
+        do {
+            let restored = try await purchaseService.restorePurchases()
+            let tier = try await SubscriptionValidationService.syncTierFromServer()
+            setTierLocally(tier)
+
+            if restored {
+                restoreMessager = "Your Pro subscription has been restored."
+                shouldPresentPaywall = false
+            } else {
+                restoreMessager = "No active Pro subscription found."
+            }
+        }
+        catch {
+            purchaseError = error.localizedDescription
+        }
+    }
+
+    // MARK: - Updating Tier
 
     func attach(purchaseService: StoreKitPurchaseService) {
         self.purchaseService = purchaseService
@@ -99,6 +126,8 @@ final class SubscriptionManager: ObservableObject {
         do {
             let purchased = try await purchaseService.purchasePro()
             if purchased {
+                let tier = try await SubscriptionValidationService.syncTierFromServer()
+                setTierLocally(tier)
                 shouldPresentPaywall = false
             }
         }
@@ -123,25 +152,27 @@ final class SubscriptionManager: ObservableObject {
         print("proPriceLabel:", proPriceLabel ?? "nil")
     }
 
-    // MARK: - Private
-
-    private func setTierLocally(_ tier: SubscriptionTier) {
+    func setTierLocally(_ tier: SubscriptionTier) {
         currentTier = tier
         defaults.set(tier.rawValue, forKey: Self.tierKey)
     }
 
+    // MARK: - Private
+
     private func pushTierToCloud(_ tier: SubscriptionTier) {
         guard let userId = supabase.auth.currentSession?.user.id else { return }
+
+        struct SubscriptionUpsert: Encodable {
+            let uid: UUID
+            let tier: String
+        }
         
         Task {
             do {
                 try await supabase
                     .from("subscriptions")
                     .upsert(
-                        [
-                            "uid": userId.uuidString,
-                            "tier": tier.rawValue
-                        ],
+                        SubscriptionUpsert(uid: userId, tier: tier.rawValue),
                         onConflict: "uid"
                     )
                     .execute()
@@ -152,15 +183,19 @@ final class SubscriptionManager: ObservableObject {
     }
 
     /// Inserts a "free" subscription row for a newly registered user.
+    // Deprecated, or used for offline mode
     private func createFreeSubscription(userId: UUID) async {
+
+        struct Subscription: Encodable {
+            let uid: UUID
+            let tier: String
+        }
+
         do {
             try await supabase
                 .from("subscriptions")
                 .upsert(
-                    [
-                        "uid": userId.uuidString,
-                        "tier": SubscriptionTier.free.rawValue
-                    ],
+                    Subscription(uid: userId, tier: SubscriptionTier.free.rawValue),
                     onConflict: "uid"
                 )
                 .execute()
@@ -179,7 +214,7 @@ final class SubscriptionManager: ObservableObject {
             let row: SubscriptionRow = try await supabase
                 .from("subscriptions")
                 .select()
-                .eq("uid", value: userId.uuidString)
+                .eq("uid", value: userId)
                 .single()
                 .execute()
                 .value
@@ -188,10 +223,10 @@ final class SubscriptionManager: ObservableObject {
             print("Same user, same tier:", row.tier)
             return .existingUser(tier: row.tier)
         } catch where isNoRowsError(error) {
-            await createFreeSubscription(userId: userId)
-            setTierLocally(.free)
-            print("New user, tier: free")
-            return .newUser(tier: .free)
+            // await createFreeSubscription()
+            let tier = (try? await SubscriptionValidationService.syncTierFromServer()) ?? .free
+            setTierLocally(tier)
+            return .newUser(tier: tier)
         }
         catch {
             print("Subscription fetch failed, using local cache: \(error)")
@@ -210,20 +245,22 @@ final class SubscriptionManager: ObservableObject {
         return message.contains("PGRST116") || message.contains("0 rows")
     }
 
-    private func reconcileWithStoreKit() async {
-        guard let purchaseService else { return }
+    // Deprecated, or used for offline mode
+    private func syncEntitlementWithStoreKit() async {
+        // guard let userId = supabase.auth.currentSession?.user.id else { return }
+        // guard let purchaseService else { return }
 
-        do {
-            let hasEntitlement = try await purchaseService.hasActiveProEntitlement()
-            if hasEntitlement && currentTier == .free {
-                updateTier(to: .pro) // Apple says pro, Supabase stale
-            } else if !hasEntitlement && currentTier == .pro {
-                updateTier(to: .free) // Subscription expired / refunded
-            }
-        }
-        catch {
-            print("StoreKit entitlement check failed: \(error)")
-        }
+        // do {
+        //     let hasEntitlement = try await purchaseService.hasActiveProEntitlement(for: userId)
+        //     let targetTier: SubscriptionTier = hasEntitlement ? .pro : .free
+
+        //     if targetTier != currentTier {
+        //         updateTier(to: targetTier)
+        //     }
+        // }
+        // catch {
+        //     print("StoreKit entitlement check failed: \(error)")
+        // }
     }
 
 // MARK: - Supabase Row Model

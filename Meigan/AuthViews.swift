@@ -449,9 +449,6 @@ private enum PasswordStrength {
             self = .invalid
             return
         }
-        let hasUpper = password.range(of: "[A-Z]", options: .regularExpression) != nil
-        let hasLower = password.range(of: "[a-z]", options: .regularExpression) != nil
-        let hasDigit = password.range(of: "[0-9]", options: .regularExpression) != nil
         let hasSpecial = password.range(of: "[^A-Za-z0-9]", options: .regularExpression) != nil
         let variety = [hasSpecial].filter { $0 }.count
 

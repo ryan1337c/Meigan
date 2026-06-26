@@ -744,7 +744,7 @@ private struct FlattenWarpResultInspectOverlay: View {
         let gap: CGFloat = 10
 
         var x = r.midX
-        var yAbove = r.minY - gap - popupH * 0.5
+        let yAbove = r.minY - gap - popupH * 0.5
         let minY = safeInsets.top + margin + popupH * 0.5
         let maxY = container.height - safeInsets.bottom - margin - popupH * 0.5
         var y: CGFloat

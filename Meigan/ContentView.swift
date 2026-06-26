@@ -45,6 +45,10 @@ struct ContentView: View {
                     priceLabel: subscriptions.proPriceLabel,
                     isPurchasing: subscriptions.isPurchasing,
                     errorMessage: subscriptions.purchaseError,
+                    isRestoring: subscriptions.isRestoring,
+                    onRestore: {
+                        Task { await subscriptions.restorePurchases() }
+                    },
                     onSkip: {
                         subscriptions.skipPaywall()
                     },

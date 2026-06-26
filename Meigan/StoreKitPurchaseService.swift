@@ -21,9 +21,9 @@ protocol SubscriptionPurchasing: AnyObject {
     var proPriceLabel: String? { get }
 
     func loadProducts() async 
-    func purchasePro(for userId: UUID) async throws -> Bool
-    func restorePurchases(for userId: UUID) async throws -> Bool
-    func hasActiveProEntitlement(for userId: UUID) async throws -> Bool
+    func purchasePro() async throws -> Bool
+    func restorePurchases() async throws -> Bool
+    func hasActiveProEntitlement() async throws -> Bool
     func startTransactionListener()
 }
 
@@ -66,7 +66,7 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
 
     // MARK: - Purchase
 
-    func purchasePro(for userId: UUID) async throws -> Bool {
+    func purchasePro() async throws -> Bool {
         if proProduct == nil {
             await loadProducts()
         }
@@ -75,14 +75,13 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
             throw StoreKitPurchaseError.productNotFound
         }
 
-        let result = try await product.purchase(
-            options: [.appAccountToken(userId)]
-        )
+        let result = try await product.purchase()
 
         switch result {
             case .success(let verification):
                 let transaction = try checkVerified(verification)
-                await handleVerifiedTransaction(transaction, expectedUserId: userId)
+                try await SubscriptionValidationService.validateOnServer(transaction: verification)
+                await handleVerifiedTransaction(transaction)
                 await transaction.finish()
                 return true
 
@@ -95,34 +94,31 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
     }
 
     // MARK: - Restore
-    func restorePurchases(for userId: UUID) async throws -> Bool {
+    func restorePurchases() async throws -> Bool {
         try await AppStore.sync()
-        let isPro = try await hasActiveProEntitlement(for: userId)
-        onEntitlementChanged?(isPro)
-        return isPro
-    }
 
-    // MARK: - Entitlements
-
-    func hasActiveProEntitlement(for userId: UUID) async throws -> Bool {
+        // For now, we check apple id for entitlements
         for await result in Transaction.currentEntitlements {
             guard let transaction = try? checkVerified(result) else { continue }
             guard transaction.productID == MeiganProducts.proMonthly else { continue }
-            guard transaction.appAccountToken == userId else { continue}
 
-            if let expiration = transaction.expirationDate {
-                if expiration > Date() { return true }
-            } else {
-                // Non-consumable purchase, lifetime access
-                return true 
-            }
+            let active = transaction.expirationDate.map { $0 > Date() } ?? true
+            guard active else { continue }
+
+            try await SubscriptionValidationService.validateOnServer(transaction: result)
+
         }
-        return false
+        let tier = try await SubscriptionValidationService.syncTierFromServer()
+        return tier == .pro
+    }
+
+    // MARK: - Entitlements
+    func hasActiveProEntitlement() async throws -> Bool {
+        let tier = try await SubscriptionValidationService.syncTierFromServer()
+        return tier == .pro
     }
 
     // MARK: - Transaction listener (start once at launch)
-
-    var currentUserIdProvider: (() -> UUID)?
 
     func startTransactionListener() {
         guard transactionListenerTask == nil else { return }
@@ -131,18 +127,16 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
             for await result in Transaction.updates {
                 guard !Task.isCancelled else { break}
                 guard let transaction = try? checkVerified(result) else { continue }
-                guard let userId = currentUserIdProvider?() else { continue}
 
-                await handleVerifiedTransaction(transaction, expectedUserId: userId)
+                await handleVerifiedTransaction(transaction)
                 await transaction.finish()
             }
         }
     }
 
     // MARK: - Private
-    private func handleVerifiedTransaction(_ transaction: Transaction, expectedUserId: UUID) async {
+    private func handleVerifiedTransaction(_ transaction: Transaction) async {
         guard transaction.productID == MeiganProducts.proMonthly else { return }
-        guard transaction.appAccountToken == expectedUserId else { return }
 
         let isActive: Bool
         if let expiration = transaction.expirationDate {

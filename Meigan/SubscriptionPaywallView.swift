@@ -28,17 +28,23 @@ struct SubscriptionPaywallView: View {
     private static let termsURL = URL(string: "https://meigan.app/terms")!
     private static let privacyURL = URL(string: "https://meigan.app/privacy")!
 
-    private let features: [(symbol: String, title: String, detail: String)] = [
-        ("square.3.layers.3d.down.right", "Flatten Mode", "Scan any surface and export a true-to-scale flattened image."),
-        ("viewfinder.circle", "Identify Mode", "Point your camera to detect and identify objects in real time."),
+    struct FeatureItem {
+        let symbol: String
+        let title: String
+        let detail: String
+    }
+
+    private let features: [FeatureItem] = [
+        FeatureItem(symbol: "square.3.layers.3d.down.right", title: "Flatten Mode", detail: "Scan any surface and export a true-to-scale flattened image."),
+        FeatureItem(symbol: "viewfinder.circle", title: "Identify Mode", detail: "Point your camera to detect and identify objects in real time."),
     ]
 
     var body: some View {
         ZStack {
             LinearGradient(
                 colors: [
-                    Color(.systemBackground),
-                    Color(.secondarySystemBackground),
+                    Color(uiColor: .systemBackground),
+                    Color(uiColor: .secondarySystemBackground),
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -188,6 +194,7 @@ struct SubscriptionPaywallView: View {
                 onRestore()
             }
             .font(.subheadline.weight(.medium))
+            .underline()
             .foregroundStyle(.secondary)
             .disabled(isPurchasing || isRestoring)
 
@@ -218,6 +225,7 @@ struct SubscriptionPaywallView: View {
 #Preview("Loaded") {
     SubscriptionPaywallView(
         priceLabel: "$4.99 / year",
+        onRestore: {},
         onSkip: {},
         onSelectPro: {}
     )
@@ -226,6 +234,7 @@ struct SubscriptionPaywallView: View {
 #Preview("Loading price") {
     SubscriptionPaywallView(
         priceLabel: nil,
+        onRestore: {},
         onSkip: {},
         onSelectPro: {}
     )
@@ -235,6 +244,7 @@ struct SubscriptionPaywallView: View {
     SubscriptionPaywallView(
         priceLabel: "$4.99 / year",
         isPurchasing: true,
+        onRestore: {},
         onSkip: {},
         onSelectPro: {}
     )
@@ -244,6 +254,7 @@ struct SubscriptionPaywallView: View {
     SubscriptionPaywallView(
         priceLabel: "$4.99 / year",
         errorMessage: "Purchase failed. Please try again.",
+        onRestore: {},
         onSkip: {},
         onSelectPro: {}
     )

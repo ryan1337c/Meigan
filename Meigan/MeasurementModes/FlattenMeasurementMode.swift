@@ -6,7 +6,6 @@ import UIKit
 import OSLog
 import Accelerate
 import CoreImage
-typealias __LAPACK_int = Int32
 
 /// Debug placement / token sync; filter Console by subsystem or category `ARPlacement`.
 private let arPlacementLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Meigan", category: "ARPlacement")
@@ -1091,19 +1090,19 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
             }
         }
 
-        var n = __LAPACK_int(3)
-        var lda = __LAPACK_int(3)
+        var n = 3
+        var lda = 3
         var w = [Double](repeating: 0, count: 3)  // Eigenvalues output (ascending)
-        var lwork = __LAPACK_int(-1)
+        var lwork = -1
         var work = [Double](repeating: 0, count: 1)
-        var info = __LAPACK_int(0)
+        var info = 0
         var jobz = Int8(86)  // 'V' = eigenvalues + eigenvectors
         var uplo = Int8(85)  // 'U' = upper triangle
 
         // Query optimal work size
         dsyev_(&jobz, &uplo, &n, &a, &lda, &w, &work, &lwork, &info)
 
-        lwork = __LAPACK_int(work[0])
+        lwork = Int(work[0])
         work = [Double](repeating: 0, count: Int(lwork))
 
         // Compute eigenvalues + eigenvectors. After this, `a` holds the orthonormal

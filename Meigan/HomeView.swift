@@ -260,6 +260,7 @@ struct AccountView: View {
                 isDestructive: true
             ) {
                 // TODO: Navigate to account deletion confirmation.
+                
             }
         }
         .background(

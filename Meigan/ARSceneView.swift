@@ -1993,7 +1993,7 @@ struct ARSceneView: UIViewRepresentable {
             rightView /= rvLen
 
             var xAxis = rightView - zAxis * simd_dot(rightView, zAxis)
-            var xLen = simd_length(xAxis)
+            let xLen = simd_length(xAxis)
             if xLen < 1e-4 {
                 var t = dir - zAxis * simd_dot(dir, zAxis)
                 var tLen = simd_length(t)

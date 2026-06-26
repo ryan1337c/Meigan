@@ -25,18 +25,17 @@ struct MeiganApp: App {
                     subscriptions.attach(purchaseService: purchaseService)
 
                     // Live entitlement updates -> sync tier + Supabase
-                    purchaseService.onEntitlementChanged = { [weak subscriptions] isPro in
-                        subscriptions?.updateTier(to: isPro ? .pro : .free)
+                    purchaseService.onEntitlementChanged = { [weak subscriptions] _ in
+                        Task { 
+                            if let tier = try? await SubscriptionValidationService.syncTierFromServer() {
+                                subscriptions?.setTierLocally(tier)
+                            }
+                        }
                     }
 
                     // Existing auth wiring
                     appSession.settingsManager = settings
                     appSession.subscriptionManager = subscriptions
-
-                    // Wire current user ID provider to StoreKitPurchaseService
-                    purchaseService.currentUserIdProvider = { 
-                        appSession.supabase.auth.currentSession?.user.id 
-                    }
 
                     // Start listening for renewals / refunds / external purchases
                     purchaseService.startTransactionListener()
