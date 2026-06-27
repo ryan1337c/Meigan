@@ -50,47 +50,23 @@ struct LoginView: View {
                 }
 
                 // Fields
-                VStack(spacing: 14) {
-                    TextField("", text: $email, prompt: Text("Email address").foregroundColor(Color(UIColor.placeholderText)))
-                        .textContentType(.emailAddress)
-                        .keyboardType(.emailAddress)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 14)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color(UIColor.separator), lineWidth: 1)
-                        )
+                VStack(spacing: 20) {
+                    AuthLabeledTextField(
+                        title: "Email",
+                        placeholder: "user@email.com",
+                        text: $email,
+                        keyboardType: .emailAddress,
+                        textContentType: .emailAddress
+                    )
 
-                    HStack(spacing: 8) {
-                        Group {
-                            if isPasswordVisible {
-                                TextField("Password", text: $password)
-                            } else {
-                                SecureField("Password", text: $password)
-                            }
-                        }
-                        .textContentType(.password)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-
-                        Button {
-                            isPasswordVisible.toggle()
-                        } label: {
-                            Image(systemName: isPasswordVisible ? "eye.slash.fill" : "eye.fill")
-                                .foregroundColor(Color(UIColor.secondaryLabel))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 14)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color(UIColor.separator), lineWidth: 1)
+                    AuthLabeledSecureField(
+                        title: "Password",
+                        placeholder: "••••••••",
+                        text: $password,
+                        isVisible: $isPasswordVisible,
+                        textContentType: .password
                     )
                 }
-                .padding(.horizontal, 4)
 
                 // Continue button
                 Button {
@@ -137,7 +113,7 @@ struct LoginView: View {
                         } label: {
                             Text("Create account")
                                 .font(.subheadline.weight(.medium))
-                                .foregroundColor(.accentColor)
+                                .foregroundStyle(.tint)
                         }
                     }
                 }
@@ -240,75 +216,45 @@ struct RegisterView: View {
                 }
 
                 // Fields
-                VStack(spacing: 14) {
-                    HStack(spacing: 12) {
-                        TextField("", text: $firstName, prompt: Text("First name").foregroundColor(Color(UIColor.placeholderText)))
-                            .textContentType(.givenName)
-                            .textInputAutocapitalization(.words)
-                            .autocorrectionDisabled()
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 14)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(Color(UIColor.separator), lineWidth: 1)
-                            )
-
-                        TextField("", text: $lastName, prompt: Text("Last name").foregroundColor(Color(UIColor.placeholderText)))
-                            .textContentType(.familyName)
-                            .textInputAutocapitalization(.words)
-                            .autocorrectionDisabled()
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 14)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(Color(UIColor.separator), lineWidth: 1)
-                            )
-                    }
-
-                    TextField("", text: $email, prompt: Text("Email address").foregroundColor(Color(UIColor.placeholderText)))
-                        .textContentType(.emailAddress)
-                        .keyboardType(.emailAddress)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 14)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color(UIColor.separator), lineWidth: 1)
+                VStack(spacing: 20) {
+                    HStack(alignment: .top, spacing: 12) {
+                        AuthLabeledTextField(
+                            title: "First name",
+                            placeholder: "Andrew",
+                            text: $firstName,
+                            textContentType: .givenName,
+                            autocapitalization: .words
                         )
 
-                    HStack(spacing: 8) {
-                        Group {
-                            if isPasswordVisible {
-                                TextField("Password", text: $password)
-                            } else {
-                                SecureField("Password", text: $password)
-                            }
-                        }
-                        .textContentType(.init(rawValue: ""))
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-
-                        Button {
-                            isPasswordVisible.toggle()
-                        } label: {
-                            Image(systemName: isPasswordVisible ? "eye.slash.fill" : "eye.fill")
-                                .foregroundColor(Color(UIColor.secondaryLabel))
-                        }
-                        .buttonStyle(.plain)
+                        AuthLabeledTextField(
+                            title: "Last name",
+                            placeholder: "Smith",
+                            text: $lastName,
+                            textContentType: .familyName,
+                            autocapitalization: .words
+                        )
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 14)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color(UIColor.separator), lineWidth: 1)
+
+                    AuthLabeledTextField(
+                        title: "Email",
+                        placeholder: "user@email.com",
+                        text: $email,
+                        keyboardType: .emailAddress,
+                        textContentType: .emailAddress
+                    )
+
+                    AuthLabeledSecureField(
+                        title: "Password",
+                        placeholder: "••••••••",
+                        text: $password,
+                        isVisible: $isPasswordVisible,
+                        textContentType: .newPassword
                     )
 
                     if !password.isEmpty {
                         PasswordStrengthIndicator(password: password)
                     }
                 }
-                .padding(.horizontal, 4)
 
                 // Create account button
                 Button {
@@ -339,7 +285,7 @@ struct RegisterView: View {
                         .foregroundColor(Color(UIColor.secondaryLabel))
                     Button("Log in") { dismiss() }
                         .font(.subheadline.weight(.medium))
-                        .foregroundColor(.accentColor)
+                        .foregroundStyle(.tint)
                 }
             }
             .padding(.horizontal, 24)
@@ -439,6 +385,147 @@ struct RegisterView: View {
     }
 
 
+// MARK: - Auth Field Components
+
+private enum AuthFieldStyle {
+    static let cornerRadius: CGFloat = 10
+    static let verticalPadding: CGFloat = 14
+    static let horizontalPadding: CGFloat = 16
+
+    static func labelColor(for scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(white: 0.88)
+            : Color(red: 0.32, green: 0.38, blue: 0.48)
+    }
+
+    static func placeholderColor(for scheme: ColorScheme) -> Color {
+        labelColor(for: scheme).opacity(0.45)
+    }
+
+    static func fieldBackground(for scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(white: 0.14)
+            : Color(red: 0.93, green: 0.95, blue: 0.97)
+    }
+
+    static func iconColor(for scheme: ColorScheme) -> Color {
+        labelColor(for: scheme).opacity(0.85)
+    }
+
+    static func borderColor(for scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(white: 0.32)
+            : Color(red: 0.32, green: 0.38, blue: 0.48).opacity(0.22)
+    }
+
+    static let borderWidth: CGFloat = 1
+
+    @ViewBuilder
+    static func fieldChrome<Content: View>(
+        for scheme: ColorScheme,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        content()
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(fieldBackground(for: scheme))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(borderColor(for: scheme), lineWidth: borderWidth)
+            )
+    }
+}
+
+private struct AuthLabeledTextField: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let title: String
+    let placeholder: String
+    @Binding var text: String
+    var keyboardType: UIKeyboardType = .default
+    var textContentType: UITextContentType?
+    var autocapitalization: TextInputAutocapitalization = .never
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(AuthFieldStyle.labelColor(for: colorScheme))
+
+            AuthFieldStyle.fieldChrome(for: colorScheme) {
+                TextField(
+                    "",
+                    text: $text,
+                    prompt: Text(placeholder).foregroundColor(AuthFieldStyle.placeholderColor(for: colorScheme))
+                )
+                .keyboardType(keyboardType)
+                .textContentType(textContentType)
+                .textInputAutocapitalization(autocapitalization)
+                .autocorrectionDisabled()
+                .padding(.horizontal, AuthFieldStyle.horizontalPadding)
+                .padding(.vertical, AuthFieldStyle.verticalPadding)
+            }
+        }
+    }
+}
+
+private struct AuthLabeledSecureField: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let title: String
+    let placeholder: String
+    @Binding var text: String
+    @Binding var isVisible: Bool
+    var textContentType: UITextContentType? = .password
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(AuthFieldStyle.labelColor(for: colorScheme))
+
+            AuthFieldStyle.fieldChrome(for: colorScheme) {
+                HStack(spacing: 8) {
+                    Group {
+                        if isVisible {
+                            TextField(
+                                "",
+                                text: $text,
+                                prompt: Text(placeholder).foregroundColor(AuthFieldStyle.placeholderColor(for: colorScheme))
+                            )
+                        } else {
+                            ZStack(alignment: .leading) {
+                                if text.isEmpty {
+                                    Text(placeholder)
+                                        .foregroundColor(AuthFieldStyle.placeholderColor(for: colorScheme))
+                                        .allowsHitTesting(false)
+                                }
+                                SecureField("", text: $text)
+                            }
+                        }
+                    }
+                    .textContentType(textContentType)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+
+                    Button {
+                        isVisible.toggle()
+                    } label: {
+                        Image(systemName: isVisible ? "eye.slash" : "eye")
+                            .font(.body.weight(.medium))
+                            .foregroundColor(AuthFieldStyle.iconColor(for: colorScheme))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isVisible ? "Hide password" : "Show password")
+                }
+                .padding(.horizontal, AuthFieldStyle.horizontalPadding)
+                .padding(.vertical, AuthFieldStyle.verticalPadding)
+            }
+        }
+    }
+}
+
 // MARK: - Password Strength
 
 private enum PasswordStrength {
@@ -537,4 +624,5 @@ private func userFacingMessage(from error: Error) -> String {
         RegisterView()
     }
     .environmentObject(AppSession())
+    .environmentObject(SettingsManager())
 }

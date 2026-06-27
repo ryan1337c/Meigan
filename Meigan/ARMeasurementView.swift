@@ -10,18 +10,61 @@ enum ARFooterFeature: String {
     case ruler
     case flatten
     case identify
+
+    /// Pro-only modes. Ruler stays available on the free tier.
+    var isProFeature: Bool {
+        switch self {
+        case .ruler:
+            return false
+        case .flatten, .identify:
+            return true
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .ruler:    return "Ruler"
+        case .flatten:  return "Flatten"
+        case .identify: return "Identify"
+        }
+    }
+}
+
+/// Drives the paywall / sign-in overlay shown when a free or guest user taps a locked mode.
+private enum FeatureLockPrompt: Equatable, Identifiable {
+    /// Signed-in free user — offer an upgrade to Pro.
+    case upgrade(ARFooterFeature)
+    /// Guest user — offer to sign in or create an account.
+    case signIn(ARFooterFeature)
+
+    var feature: ARFooterFeature {
+        switch self {
+        case .upgrade(let f), .signIn(let f):
+            return f
+        }
+    }
+
+    var id: String {
+        switch self {
+        case .upgrade(let f): return "upgrade-\(f.rawValue)"
+        case .signIn(let f):  return "signIn-\(f.rawValue)"
+        }
+    }
 }
 
 struct ARMeasurementView: View {
     @AppStorage("hasSeenExplainer") private var hasSeenExplainer = false
     @EnvironmentObject private var appSession: AppSession
     @EnvironmentObject private var settings: SettingsManager
+    @EnvironmentObject private var subscriptions: SubscriptionManager
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
 
     @State private var showExplainer = false
     @State private var showAccount = false
     @State private var showSettings = false
+    @State private var featureLockPrompt: FeatureLockPrompt?
+    @State private var showUpgradePaywall = false
     @State private var isCoachingActive = true
     @State private var isRelocalizing = false
     @State private var hasValidTarget = false
@@ -71,6 +114,30 @@ struct ARMeasurementView: View {
         case .identify:
             return false
         }
+    }
+
+    private var isPro: Bool {
+        subscriptions.currentTier == .pro
+    }
+
+    /// Modes the user can't enter yet (Pro features while on the free tier).
+    private var lockedFeatures: Set<ARFooterFeature> {
+        isPro ? [] : [.flatten, .identify]
+    }
+
+    /// While the paywall/sign-in overlay is up we tear down ARKit so the camera,
+    /// plane detection, and per-frame work all stop until the user resumes.
+    private var blocksARSession: Bool {
+        showAccount || showSettings || featureLockPrompt != nil
+    }
+
+    private func refreshARSessionActive() {
+        isARSessionActive = (scenePhase == .active) && !blocksARSession
+    }
+
+    /// Routes a tap on a locked mode to the right prompt (guest → sign in, free → upgrade).
+    private func handleLockedFeatureTap(_ feature: ARFooterFeature) {
+        featureLockPrompt = appSession.isGuest ? .signIn(feature) : .upgrade(feature)
     }
 
     var body: some View {
@@ -147,12 +214,19 @@ struct ARMeasurementView: View {
                         profileInitial: profileInitial,
                         isGuest: appSession.isGuest,
                         hasPinnedPoints: hasPinnedMeasurementPoints,
+                        lockedFeatures: lockedFeatures,
                         onBack: { dismiss() },
                         onStartScan: {
                             flattenScanToken += 1
                             arMeasurementUILog.notice("Start Scan tapped")
                         },
-                        onSelectFeature: { selectedFeature = $0 },
+                        onSelectFeature: { feature in
+                            if lockedFeatures.contains(feature) {
+                                handleLockedFeatureTap(feature)
+                            } else {
+                                selectedFeature = feature
+                            }
+                        },
                         onScreenshot: {
                             guard trackingGuideMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
                             guard !isFlattenScanActive else { return }
@@ -239,6 +313,45 @@ struct ARMeasurementView: View {
                             }
                         )
                     }
+
+                    if let prompt = featureLockPrompt {
+                        FeatureLockOverlay(
+                            prompt: prompt,
+                            priceLabel: subscriptions.proPriceLabel,
+                            onPrimaryAction: {
+                                switch prompt {
+                                case .upgrade:
+                                    showUpgradePaywall = true
+                                case .signIn:
+                                    featureLockPrompt = nil
+                                    appSession.logOut()
+                                }
+                            },
+                            onDismiss: { featureLockPrompt = nil }
+                        )
+                        .transition(.opacity)
+                        .zIndex(10)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.22), value: featureLockPrompt)
+                .fullScreenCover(isPresented: $showUpgradePaywall) {
+                    SubscriptionPaywallView(
+                        priceLabel: subscriptions.proPriceLabel,
+                        isPurchasing: subscriptions.isPurchasing,
+                        errorMessage: subscriptions.purchaseError,
+                        isRestoring: subscriptions.isRestoring,
+                        onRestore: {
+                            Task { await subscriptions.restorePurchases() }
+                        },
+                        onSkip: {
+                            showUpgradePaywall = false
+                            featureLockPrompt = nil
+                        },
+                        onSelectPro: {
+                            Task { await subscriptions.upgradeToPro() }
+                        }
+                    )
+                    .task { await subscriptions.loadProductsIfNeeded() }
                 }
                 .sheet(isPresented: $showShareSheet, onDismiss: { shareSheetItems = [] }) {
                     ActivityView(activityItems: shareSheetItems)
@@ -278,16 +391,24 @@ struct ARMeasurementView: View {
             flattenDetectionPreviewImage = nil
             isFlattenScanActive = false
         }
-        .onChange(of: scenePhase) { phase in
-            isARSessionActive = (phase == .active) && !showAccount && !showSettings
+        .onChange(of: scenePhase) { _ in
+            refreshARSessionActive()
         }
-        .onChange(of: showAccount) { showing in
-            if showing { isARSessionActive = false }
-            else if scenePhase == .active && !showSettings { isARSessionActive = true }
+        .onChange(of: showAccount) { _ in
+            refreshARSessionActive()
         }
-        .onChange(of: showSettings) { showing in
-            if showing { isARSessionActive = false }
-            else if scenePhase == .active && !showAccount { isARSessionActive = true }
+        .onChange(of: showSettings) { _ in
+            refreshARSessionActive()
+        }
+        .onChange(of: featureLockPrompt) { _ in
+            refreshARSessionActive()
+        }
+        .onChange(of: subscriptions.currentTier) { tier in
+            // Purchase completed (here or via the full paywall) — unlock and resume.
+            if tier == .pro {
+                showUpgradePaywall = false
+                featureLockPrompt = nil
+            }
         }
         .onChange(of: isCoachingActive) { active in
             if active {
@@ -1033,6 +1154,131 @@ private struct OverlayGuideBanner: View {
     }
 }
 
+/// Paywall / sign-in card shown over the AR screen when a free or guest user taps a locked mode.
+/// The AR session is torn down by the parent while this is visible, so nothing renders behind it.
+private struct FeatureLockOverlay: View {
+    let prompt: FeatureLockPrompt
+    let priceLabel: String?
+    let onPrimaryAction: () -> Void
+    let onDismiss: () -> Void
+
+    private var isGuestPrompt: Bool {
+        if case .signIn = prompt { return true }
+        return false
+    }
+
+    private var title: String {
+        isGuestPrompt ? "Sign in to unlock" : "Upgrade to PRO"
+    }
+
+    private var message: String {
+        let feature = prompt.feature.displayName
+        if isGuestPrompt {
+            return "\(feature) Mode is part of Meigan Pro. Sign in or create an account to upgrade and unlock it."
+        }
+        return "\(feature) Mode is a Pro feature. Right now you are on a free plan — upgrade for access."
+    }
+
+    private var primaryTitle: String {
+        isGuestPrompt ? "Sign In or Create Account" : "Upgrade to PRO"
+    }
+
+    private var secondaryTitle: String {
+        isGuestPrompt ? "Not now" : "Not today"
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.62)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { onDismiss() }
+
+            VStack(spacing: 20) {
+                badge
+
+                VStack(spacing: 8) {
+                    Text(title)
+                        .font(.title2.weight(.bold))
+                        .multilineTextAlignment(.center)
+
+                    Text(message)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if !isGuestPrompt, let priceLabel {
+                    Text(priceLabel)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundColor(.accentColor)
+                }
+
+                VStack(spacing: 10) {
+                    Button(action: onPrimaryAction) {
+                        Text(primaryTitle)
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 15)
+                    }
+                    .foregroundColor(.white)
+                    .background(Color.accentColor)
+                    .clipShape(Capsule())
+
+                    Button(action: onDismiss) {
+                        Text(secondaryTitle)
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 15)
+                    }
+                    .foregroundColor(.accentColor)
+                    .background(
+                        Capsule().strokeBorder(Color.accentColor.opacity(0.5), lineWidth: 1.5)
+                    )
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: 360)
+            .background(
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(Color(.secondarySystemBackground))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.4), radius: 30, y: 14)
+            .padding(.horizontal, 28)
+        }
+        .foregroundColor(.primary)
+    }
+
+    private var badge: some View {
+        ZStack {
+            Circle()
+                .fill(Color.accentColor.opacity(0.14))
+                .frame(width: 96, height: 96)
+
+            Image("Logo")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 58, height: 58)
+
+            Image(systemName: "lock.fill")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundColor(.white)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Color.accentColor))
+                .overlay(
+                    Circle().strokeBorder(Color(.secondarySystemBackground), lineWidth: 2.5)
+                )
+                .offset(x: 33, y: 33)
+        }
+        .padding(.top, 4)
+    }
+}
+
 // View for crosshair, buttons, etc.
 private struct OverlaysView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -1054,6 +1300,7 @@ private struct OverlaysView: View {
     let profileInitial: String
     let isGuest: Bool
     let hasPinnedPoints: Bool
+    let lockedFeatures: Set<ARFooterFeature>
     let onBack: () -> Void
     let onStartScan: () -> Void
     let onSelectFeature: (ARFooterFeature) -> Void
@@ -1248,6 +1495,7 @@ private struct OverlaysView: View {
                         profileInitial: profileInitial,
                         isGuest: isGuest,
                         selectedFeature: selectedFeature,
+                        lockedFeatures: lockedFeatures,
                         interactionLockedDuringFlattenScan: isFlattenScanActive,
                         onSelectFeature: onSelectFeature,
                         onAccount: onAccount,
@@ -1369,6 +1617,7 @@ private struct ARApplicationFooter: View {
     let profileInitial: String
     let isGuest: Bool
     let selectedFeature: ARFooterFeature
+    let lockedFeatures: Set<ARFooterFeature>
     let interactionLockedDuringFlattenScan: Bool
     let onSelectFeature: (ARFooterFeature) -> Void
     let onAccount: () -> Void
@@ -1380,7 +1629,8 @@ private struct ARApplicationFooter: View {
             footerFeatureButton(
                 title: "Ruler",
                 systemImage: "ruler",
-                isSelected: selectedFeature == .ruler
+                isSelected: selectedFeature == .ruler,
+                isLocked: lockedFeatures.contains(.ruler)
             ) {
                 onSelectFeature(.ruler)
             }
@@ -1391,7 +1641,8 @@ private struct ARApplicationFooter: View {
             footerFeatureButton(
                 title: "Flatten",
                 systemImage: "level",
-                isSelected: selectedFeature == .flatten
+                isSelected: selectedFeature == .flatten,
+                isLocked: lockedFeatures.contains(.flatten)
             ) {
                 onSelectFeature(.flatten)
             }
@@ -1402,7 +1653,8 @@ private struct ARApplicationFooter: View {
             footerFeatureButton(
                 title: "Identify",
                 systemImage: "viewfinder.circle",
-                isSelected: selectedFeature == .identify
+                isSelected: selectedFeature == .identify,
+                isLocked: lockedFeatures.contains(.identify)
             ) {
                 onSelectFeature(.identify)
             }
@@ -1430,16 +1682,23 @@ private struct ARApplicationFooter: View {
         title: String,
         systemImage: String,
         isSelected: Bool,
+        isLocked: Bool,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             VStack(spacing: 6) {
                 Image(systemName: systemImage)
                     .font(.system(size: 21, weight: .semibold))
+                    .overlay(alignment: .topTrailing) {
+                        if isLocked {
+                            FooterLockBadge()
+                                .offset(x: 11, y: -7)
+                        }
+                    }
                 Text(title)
                     .font(.caption.weight(.semibold))
             }
-            .foregroundColor(isSelected ? .white : .white.opacity(0.72))
+            .foregroundColor(featureTint(isSelected: isSelected, isLocked: isLocked))
             .frame(maxWidth: .infinity, minHeight: 56)
             .background(
                 RoundedRectangle(cornerRadius: 10)
@@ -1450,6 +1709,32 @@ private struct ARApplicationFooter: View {
         .buttonStyle(.plain)
         .frame(maxWidth: .infinity)
         .contentShape(Rectangle())
+        .accessibilityLabel(isLocked ? "\(title), Pro feature, locked" : title)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+
+    private func featureTint(isSelected: Bool, isLocked: Bool) -> Color {
+        if isSelected {
+            return .white
+        }
+        return isLocked ? .white.opacity(0.5) : .white.opacity(0.72)
+    }
+}
+
+/// Small lock pip pinned to the top-trailing of a locked footer mode icon.
+private struct FooterLockBadge: View {
+    var body: some View {
+        Image(systemName: "lock.fill")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundColor(.white)
+            .frame(width: 16, height: 16)
+            .background(
+                Circle().fill(Color.accentColor)
+            )
+            .overlay(
+                Circle().strokeBorder(Color.black.opacity(0.55), lineWidth: 1.5)
+            )
+            .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
     }
 }
 
