@@ -18,6 +18,13 @@ final class AppSession: ObservableObject {
     @Published private(set) var isAuthenticated = false
     @Published private(set) var isGuest = false
 
+    /// True while the user is in the "forgot password" flow. The email recovery
+    /// step establishes a real Supabase session (the SDK emits `.signedIn`), but
+    /// we don't want that to drop the user into the main app — they should stay
+    /// in the reset flow and return to the login screen afterwards. While this is
+    /// set, auth state transitions are ignored.
+    @Published var isResettingPassword = false
+
     /// Injected by MeiganApp so auth events can trigger domain-specific sync.
     weak var settingsManager: SettingsManager? {
         didSet { flushPendingSyncIfNeeded() }
@@ -34,7 +41,7 @@ final class AppSession: ObservableObject {
     /// which would otherwise overwrite in-progress local edits.
     private var hasSyncedThisLaunch = false
 
-    var shouldShowMainApp: Bool { isAuthenticated || isGuest }
+    var shouldShowMainApp: Bool { (isAuthenticated || isGuest) && !isResettingPassword }
 
     init() {
         isGuest = UserDefaults.standard.bool(forKey: Self.guestKey)
@@ -47,6 +54,20 @@ final class AppSession: ObservableObject {
         UserDefaults.standard.set(true, forKey: Self.guestKey)
         settingsManager?.markSignedOut()
         subscriptionManager?.handleSignOut()
+    }
+
+    /// Call when entering the "forgot password" flow so the recovery session that
+    /// the email-verification step creates doesn't auto-navigate into the app.
+    func beginPasswordReset() {
+        isResettingPassword = true
+    }
+
+    /// Call when leaving the "forgot password" flow (success or cancel). Tears down
+    /// any recovery session so the user lands back on a clean login screen and signs
+    /// in with their new password.
+    func endPasswordReset() {
+        isResettingPassword = false
+        Task { try? await supabase.auth.signOut() }
     }
 
     func logOut() {
@@ -64,6 +85,10 @@ final class AppSession: ObservableObject {
     private func listenForAuthChanges() {
         Task {
             for await (event, session) in supabase.auth.authStateChanges {
+                // While resetting a password, the email recovery step signs the
+                // user in behind the scenes. Ignore every transition so we stay in
+                // the reset flow; `endPasswordReset()` performs an explicit sign-out.
+                if isResettingPassword { continue }
                 switch event {
                 case .signedIn:
                     await activateAuthenticatedSession()
