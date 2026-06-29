@@ -49,6 +49,10 @@ final class SubscriptionManager: ObservableObject {
     @Published private(set) var purchaseError: String?
     @Published private(set) var proPriceLabel: String?
 
+    /// Renewal/expiration date for the active Pro subscription, used by the
+    /// cancel-subscription dialog. `nil` until refreshed (or when on Free).
+    @Published private(set) var proExpirationDate: Date?
+
     // StoreKitPurchaseService is injected by MeiganApp
     private var purchaseService: StoreKitPurchaseService?
 
@@ -144,6 +148,11 @@ final class SubscriptionManager: ObservableObject {
         pushTierToCloud(tier)
     }
 
+    /// Refreshes the Pro renewal/expiration date from StoreKit.
+    func refreshProExpirationDate() async {
+        proExpirationDate = await purchaseService?.currentProExpirationDate()
+    }
+
     func loadProductsIfNeeded() async {
         guard proPriceLabel == nil else { return }
         await purchaseService?.loadProducts()
@@ -155,6 +164,50 @@ final class SubscriptionManager: ObservableObject {
     func setTierLocally(_ tier: SubscriptionTier) {
         currentTier = tier
         defaults.set(tier.rawValue, forKey: Self.tierKey)
+    }
+
+    func fetchProfile() async throws -> Profile {
+        guard let userId = supabase.auth.currentSession?.user.id else {
+            return Profile(firstName: "", lastName: "")
+        }
+
+        let row: Profile = try await supabase
+            .from("profile")
+            .select("first_name, last_name")
+            .eq("uid", value: userId)
+            .single()
+            .execute()
+            .value
+
+        return row
+    }
+
+    func updateProfile(firstName: String, lastName: String) async throws {
+        guard let userId = supabase.auth.currentSession?.user.id else { return }
+
+        struct ProfileUpsert: Encodable {
+            let uid: UUID
+            let firstName: String
+            let lastName: String
+
+            enum CodingKeys: String, CodingKey {
+                case uid
+                case firstName = "first_name"
+                case lastName = "last_name"
+            }
+        }
+
+        try await supabase
+            .from("profile")
+            .upsert(
+                ProfileUpsert(
+                    uid: userId,
+                    firstName: firstName,
+                    lastName: lastName
+                ),
+                onConflict: "uid"
+            )
+            .execute()
     }
 
     // MARK: - Private
@@ -274,4 +327,16 @@ struct SubscriptionRow: Decodable {
         case tier
     }
 }
+
+// MARK: - Profile Model
+struct Profile: Equatable, Decodable {
+    let firstName: String
+    let lastName: String
+
+    enum CodingKeys: String, CodingKey {
+        case firstName = "first_name"
+        case lastName = "last_name"
+    }
+}
+
 }

@@ -24,6 +24,7 @@ protocol SubscriptionPurchasing: AnyObject {
     func purchasePro() async throws -> Bool
     func restorePurchases() async throws -> Bool
     func hasActiveProEntitlement() async throws -> Bool
+    func currentProExpirationDate() async -> Date?
     func startTransactionListener()
 }
 
@@ -116,6 +117,20 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
     func hasActiveProEntitlement() async throws -> Bool {
         let tier = try await SubscriptionValidationService.syncTierFromServer()
         return tier == .pro
+    }
+
+    /// Renewal/expiration date of the active Pro entitlement, if any.
+    /// `nil` when there is no active Pro subscription (or it never expires).
+    func currentProExpirationDate() async -> Date? {
+        for await result in Transaction.currentEntitlements {
+            guard let transaction = try? checkVerified(result) else { continue }
+            guard transaction.productID == MeiganProducts.proMonthly else { continue }
+
+            if let expiration = transaction.expirationDate, expiration > Date() {
+                return expiration
+            }
+        }
+        return nil
     }
 
     // MARK: - Transaction listener (start once at launch)
