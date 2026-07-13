@@ -9,12 +9,40 @@ enum SubscriptionValidationService {
         let jws = transaction.jwsRepresentation
 
         struct Body: Encodable { let signedTransaction: String }
-        struct Response: Decodable { let tier: String }
+        
+        // Define structs for both success and error scenarios
+        struct SuccessResponse: Decodable { 
+            let tier: String 
+            let expiresAt: String? // Added since your backend returns this!
+        }
+        struct ErrorResponse: Decodable { 
+            let error: String 
+        }
 
-        let _: Response = try await supabase.functions.invoke(
-            "validate-subscription",
-            options: FunctionInvokeOptions(body: Body(signedTransaction: jws))
-        )
+        do {
+            // Attempt the invocation
+            let response: SuccessResponse = try await supabase.functions.invoke(
+                "validate-subscription",
+                options: FunctionInvokeOptions(body: Body(signedTransaction: jws))
+            )
+            
+            print("Successfully validated! Tier: \(response.tier)")
+         
+            
+        } catch { 
+            if case FunctionsError.httpError(let code, let data) = error {
+                if let serverError = try? JSONDecoder().decode(ErrorResponse.self, from: data) {
+                    print("Server rejected transaction (\(code)): \(serverError.error)")
+                    throw CustomSubscriptionError.overlap(message: serverError.error)
+                } else {
+                    print("Unknown server error with status: \(code)")
+                    throw error
+                }
+            }
+            // Catch standard network/decoding errors
+            print("Network or decoding failed: \(error.localizedDescription)")
+            throw error
+        }
     }
 
     // Synchronizes the user's tier from the server
@@ -29,6 +57,16 @@ enum SubscriptionValidationService {
 
         return tier
             
+    }
+
+    enum CustomSubscriptionError: Error, LocalizedError {
+        case overlap(message: String)
+        
+        var errorDescription: String? {
+            switch self {
+            case .overlap(let message): return message
+            }
+        }
     }
 
 }

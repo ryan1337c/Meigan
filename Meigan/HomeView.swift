@@ -156,6 +156,7 @@ private struct AvatarBadge: View {
 // MARK: - Account Screen
 
 struct AccountView: View {
+    @EnvironmentObject private var appSession: AppSession
     @EnvironmentObject private var settings: SettingsManager
     @EnvironmentObject private var subscriptions: SubscriptionManager
 
@@ -164,6 +165,8 @@ struct AccountView: View {
     @State private var showManageSubscriptions = false
     @State private var showPersonalInfoEditor = false
     @State private var showChangePassword = false
+    @State private var showDeleteConfirmation = false
+    @State private var deletionState: AccountDeletionSubscriptionState?
 
     var body: some View {
         ScrollView {
@@ -194,18 +197,35 @@ struct AccountView: View {
                 errorMessage: subscriptions.purchaseError,
                 isRestoring: subscriptions.isRestoring,
                 onRestore: {
-                    Task { await subscriptions.restorePurchases() }
+                    Task { 
+                        await subscriptions.restorePurchases() 
+                        if subscriptions.currentTier == .pro {
+                            showUpdatePaywall = false
+                        }
+                    }
                 },
                 onSkip: {
                     showUpdatePaywall = false
                 },
                 onSelectPro: {
-                    Task { await subscriptions.upgradeToPro() }
+                    Task { 
+                        await subscriptions.upgradeToPro() 
+                        if subscriptions.currentTier == .pro {
+                            showUpdatePaywall = false
+                        }
+                    }
                 }
             )
             .task { await subscriptions.loadProductsIfNeeded() }
         }
         .manageSubscriptionsSheet(isPresented: $showManageSubscriptions)
+        .onChange(of: showManageSubscriptions) { isPresented in
+            guard !isPresented else { return }
+
+            Task {
+                await subscriptions.reconcileEntitlements()
+            }
+        }
         .overlay {
             if showCancelConfirmation {
                 CancelPremiumDialog(
@@ -222,8 +242,50 @@ struct AccountView: View {
                 .zIndex(1)
             }
         }
+        .overlay {
+            if let message = subscriptions.restoreMessager {
+                RestoreResultDialog(
+                    isSuccess: subscriptions.currentTier == .pro,
+                    message: message,
+                    onDone: { subscriptions.clearRestoreMessage() }
+                )
+                .transition(.opacity)
+                .zIndex(2)
+            }
+        }
+        .overlay {
+            if showDeleteConfirmation, let deletionState {
+                DeleteAccountDialog(
+                    state: deletionState,
+                    onManage: {
+                        showDeleteConfirmation = false
+                        showManageSubscriptions = true
+                    },
+                    onDelete: {
+                        showDeleteConfirmation = false
+                        Task {
+                            do {
+                                try await appSession.deleteAccount()
+                            } 
+                            catch {
+                                if case FunctionsError.httpError(let code, let data) = error {
+                                    print("Delete account HTTP \(code):", String(data: data, encoding: .utf8) ?? "unknown")
+                                }
+                                throw error
+                            }
+                        }
+                    },
+                    onCancel: {
+                        showDeleteConfirmation = false
+                    }
+                )
+                .transition(.opacity)
+                .zIndex(3)
+            }
+        }
         .animation(.easeInOut(duration: 0.2), value: showCancelConfirmation)
-        .task { await subscriptions.refreshProExpirationDate() }
+        .animation(.easeInOut(duration: 0.2), value: subscriptions.restoreMessager)
+        .animation(.easeInOut(duration: 0.2), value: showDeleteConfirmation)
     }
 
     private var yourPlanSection: some View {
@@ -310,8 +372,10 @@ struct AccountView: View {
                 systemImage: "trash",
                 isDestructive: true
             ) {
-                // TODO: Navigate to account deletion confirmation.
-
+                Task {
+                    deletionState = await subscriptions.accountDeletionState()
+                    showDeleteConfirmation = true
+                }
             }
         }
         .background(
@@ -1056,6 +1120,144 @@ private struct CancelPremiumDialog: View {
 
                     Button(action: onKeep) {
                         Text("Keep Premium")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            .padding(24)
+            .background(
+                RoundedRectangle(cornerRadius: 20)
+                    .fill(Color(.systemBackground))
+            )
+            .padding(.horizontal, 32)
+        }
+    }
+}
+
+// MARK: - Restore Result Dialog
+
+/// Centered, dimmed-overlay confirmation shown after "Restore Purchases".
+/// Mirrors `CancelPremiumDialog` styling; icon and accent adapt to whether an
+/// active subscription was found.
+private struct RestoreResultDialog: View {
+    let isSuccess: Bool
+    let message: String
+    let onDone: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onDone)
+
+            VStack(spacing: 20) {
+                VStack(spacing: 8) {
+                    Image(systemName: isSuccess ? "checkmark.seal.fill" : "info.circle.fill")
+                        .font(.title)
+                        .foregroundColor(isSuccess ? .accentColor : .secondary)
+                    Text(isSuccess ? "Purchases Restored" : "No Subscription Found")
+                        .font(.title2.weight(.bold))
+                        .multilineTextAlignment(.center)
+                }
+
+                Text(message)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button(action: onDone) {
+                    Text("Done")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(24)
+            .background(
+                RoundedRectangle(cornerRadius: 20)
+                    .fill(Color(.systemBackground))
+            )
+            .padding(.horizontal, 32)
+        }
+    }
+}
+
+// MARK: - Delete Account Dialog
+
+/// Centered, dimmed-overlay confirmation shown when the user taps "Delete
+/// account". The warning copy — and whether a "Manage Subscriptions" button is
+/// offered — adapts to the user's subscription state so we only surface the
+/// Apple-required billing warning when a still-renewing subscription exists.
+private struct DeleteAccountDialog: View {
+    let state: AccountDeletionSubscriptionState
+    let onManage: () -> Void
+    let onDelete: () -> Void
+    let onCancel: () -> Void
+
+    private var message: String {
+        switch state {
+        case .free:
+            return "Are you sure you want to delete your account? All of your saved data, preferences, and profile information will be permanently erased. This cannot be undone."
+        case .premiumAutoRenewing:
+            return "Deleting your account will permanently erase your data, but it will not cancel your Meigan Premium subscription. You will continue to be billed by Apple unless you cancel."
+        case .premiumExpiring:
+            return "Your Premium subscription is already set to expire, but deleting your account now will forfeit your remaining Premium access. Your data will be permanently erased."
+        }
+    }
+
+    private var showsManageButton: Bool {
+        state == .premiumAutoRenewing
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onCancel)
+
+            VStack(spacing: 20) {
+                VStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.title)
+                        .foregroundColor(.red)
+                    Text("Delete Account?")
+                        .font(.title2.weight(.bold))
+                        .multilineTextAlignment(.center)
+                }
+
+                Text(message)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                VStack(spacing: 10) {
+                    if showsManageButton {
+                        Button(action: onManage) {
+                            Text("Manage Subscriptions")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+
+                    Button(role: .destructive, action: onDelete) {
+                        Text("Delete Account")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+
+                    Button(action: onCancel) {
+                        Text("Cancel")
                             .font(.headline)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)

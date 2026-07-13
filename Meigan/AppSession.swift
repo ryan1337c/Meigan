@@ -80,6 +80,11 @@ final class AppSession: ObservableObject {
         }
     }
 
+    func deleteAccount() async throws{
+        try await supabase.functions.invoke("delete-account");
+        logOut()
+    }
+
     // MARK: - Private
 
     private func listenForAuthChanges() {

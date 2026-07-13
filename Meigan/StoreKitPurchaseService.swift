@@ -25,7 +25,9 @@ protocol SubscriptionPurchasing: AnyObject {
     func restorePurchases() async throws -> Bool
     func hasActiveProEntitlement() async throws -> Bool
     func currentProExpirationDate() async -> Date?
+    func currentProAutoRenewStatus() async -> Bool?
     func startTransactionListener()
+    func currentProEntitlement() async -> VerificationResult<Transaction>?
 }
 
 @MainActor 
@@ -38,8 +40,10 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
         return "\(proProduct.displayPrice) / month"
     }
 
-    // Called when StoreKit entitlement changes (renewal, cancel, restore)
-    var onEntitlementChanged: ((Bool) -> Void)?
+    // Thin "poke" fired when Transaction.updates delivers a Pro transaction
+    // (renewal, refund, external purchase). The listener doesn't interpret the
+    // event — SubscriptionManager re-derives state via reconcileEntitlements().
+    var onEntitlementChanged: ((VerificationResult<Transaction>) async -> Void)?
 
     // Listens for StoreKit transactions and updates the entitlement
     // Accounts for for purchases made outside the app
@@ -81,8 +85,9 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
         switch result {
             case .success(let verification):
                 let transaction = try checkVerified(verification)
+                // Strict validation: 409 / overlap errors surface to the paywall.
+                // On failure the transaction stays unfinished so StoreKit retries.
                 try await SubscriptionValidationService.validateOnServer(transaction: verification)
-                await handleVerifiedTransaction(transaction)
                 await transaction.finish()
                 return true
 
@@ -98,36 +103,58 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
     func restorePurchases() async throws -> Bool {
         try await AppStore.sync()
 
-        // For now, we check apple id for entitlements
-        for await result in Transaction.currentEntitlements {
-            guard let transaction = try? checkVerified(result) else { continue }
-            guard transaction.productID == MeiganProducts.proMonthly else { continue }
+        guard let result = await currentProEntitlement() else { return false }
 
-            let active = transaction.expirationDate.map { $0 > Date() } ?? true
-            guard active else { continue }
+        // Keep strict validation so 409 / overlap still surfaces on Restore tap
+        try await SubscriptionValidationService.validateOnServer(transaction: result)
+        return true
 
-            try await SubscriptionValidationService.validateOnServer(transaction: result)
 
-        }
-        let tier = try await SubscriptionValidationService.syncTierFromServer()
-        return tier == .pro
     }
 
     // MARK: - Entitlements
     func hasActiveProEntitlement() async throws -> Bool {
+        // Apple id bounded entitlement 
         let tier = try await SubscriptionValidationService.syncTierFromServer()
         return tier == .pro
+    }
+
+    func currentProEntitlement() async -> VerificationResult<Transaction>? {
+        for await result in Transaction.currentEntitlements {
+            guard case .verified(let transaction) = result else { continue }
+            guard transaction.productID == MeiganProducts.proMonthly else { continue }
+            guard isProEntitlementActive(transaction) else { continue }
+            
+            return result
+        }
+        return nil
     }
 
     /// Renewal/expiration date of the active Pro entitlement, if any.
     /// `nil` when there is no active Pro subscription (or it never expires).
     func currentProExpirationDate() async -> Date? {
-        for await result in Transaction.currentEntitlements {
-            guard let transaction = try? checkVerified(result) else { continue }
-            guard transaction.productID == MeiganProducts.proMonthly else { continue }
+        guard let result = await currentProEntitlement(),
+            case .verified(let transaction) = result else { return nil }
+        return transaction.expirationDate
+    }
 
-            if let expiration = transaction.expirationDate, expiration > Date() {
-                return expiration
+    /// Auto-renewal preference for the active Pro subscription.
+    /// - Returns: `true` if the subscription will auto-renew, `false` if the
+    ///   user has already turned auto-renew off (still active until expiry),
+    ///   or `nil` when there is no active Pro entitlement / status is unknown.
+    func currentProAutoRenewStatus() async -> Bool? {
+        guard await currentProEntitlement() != nil else { return nil }
+
+        if proProduct == nil {
+            await loadProducts()
+        }
+        guard let subscription = proProduct?.subscription else { return nil }
+
+        let statuses = (try? await subscription.status) ?? []
+        for status in statuses {
+            guard case .verified(let renewalInfo) = status.renewalInfo else { continue }
+            if renewalInfo.currentProductID == MeiganProducts.proMonthly {
+                return renewalInfo.willAutoRenew
             }
         }
         return nil
@@ -140,27 +167,23 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
 
         transactionListenerTask = Task {
             for await result in Transaction.updates {
-                guard !Task.isCancelled else { break}
-                guard let transaction = try? checkVerified(result) else { continue }
+                guard !Task.isCancelled else { break }
+                guard case .verified(let transaction) = result else { continue }
+                guard transaction.productID == MeiganProducts.proMonthly else { continue }
 
-                await handleVerifiedTransaction(transaction)
+                // Notify only — reconcileEntitlements() re-scans StoreKit and
+                // handles server validation/sync for this update.
+                await onEntitlementChanged?(result)
                 await transaction.finish()
             }
         }
     }
 
     // MARK: - Private
-    private func handleVerifiedTransaction(_ transaction: Transaction) async {
-        guard transaction.productID == MeiganProducts.proMonthly else { return }
 
-        let isActive: Bool
-        if let expiration = transaction.expirationDate {
-            isActive = expiration > Date()
-        } else {
-            isActive = true
-        }
-
-        onEntitlementChanged?(isActive)
+    private func isProEntitlementActive(_ transaction: Transaction) -> Bool {
+        transaction.revocationDate == nil &&
+        (transaction.expirationDate.map { $0 > Date() } ?? true)
     }
 
     private func checkVerified<T>(_ result: VerificationResult<T>) throws -> T {

@@ -11,27 +11,21 @@ import Combine
 import Foundation
 import SwiftUI
 import Supabase
-
-enum SignInSubscriptionOutcome: Equatable {
-    case existingUser(tier: SubscriptionTier)
-    case newUser(tier: SubscriptionTier)
-    case fetchFailedUsedCache
-}
-
-enum SubscriptionPaywallPolicy {
-    static func shouldPresent(outcome: SignInSubscriptionOutcome) -> Bool {
-        switch outcome {
-        case .newUser(let tier):
-            return tier != .pro
-        case .existingUser, .fetchFailedUsedCache:
-            return false
-        }
-    }
-}
+import StoreKit
 
 enum SubscriptionTier: String, Codable {
     case free = "free"
     case pro  = "pro"
+}
+
+/// Subscription context used to tailor the account-deletion confirmation copy.
+enum AccountDeletionSubscriptionState: Equatable {
+    /// Free user with no active subscription.
+    case free
+    /// Active Pro subscription that is still set to auto-renew.
+    case premiumAutoRenewing
+    /// Active Pro subscription with auto-renew already turned off (expiring).
+    case premiumExpiring
 }
 
 @MainActor
@@ -56,6 +50,9 @@ final class SubscriptionManager: ObservableObject {
     // StoreKitPurchaseService is injected by MeiganApp
     private var purchaseService: StoreKitPurchaseService?
 
+    // Expiry timer
+    private var expiryTimerTask: Task<Void, Never>?
+
     // MARK: - Init
 
     init() {
@@ -73,9 +70,11 @@ final class SubscriptionManager: ObservableObject {
     func handleSignIn() async {
         guard let userId = supabase.auth.currentSession?.user.id else { return }
 
-        let outcome = await resolveSignInOutcome(userId: userId)
+        let isNewUser = await subscriptionRowExists(userId: userId)
 
-        shouldPresentPaywall = SubscriptionPaywallPolicy.shouldPresent(outcome: outcome)
+        await reconcileEntitlements()
+
+        shouldPresentPaywall = isNewUser && currentTier != .pro
     }
 
     /// Called by AppSession on `.signedOut` or guest mode.
@@ -84,6 +83,8 @@ final class SubscriptionManager: ObservableObject {
         shouldPresentPaywall = false
         purchaseError = nil
         isPurchasing = false
+        expiryTimerTask?.cancel()
+        expiryTimerTask = nil
     }
 
     @Published private(set) var isRestoring: Bool = false
@@ -99,8 +100,7 @@ final class SubscriptionManager: ObservableObject {
 
         do {
             let restored = try await purchaseService.restorePurchases()
-            let tier = try await SubscriptionValidationService.syncTierFromServer()
-            setTierLocally(tier)
+            await reconcileEntitlements()
 
             if restored {
                 restoreMessager = "Your Pro subscription has been restored."
@@ -114,10 +114,21 @@ final class SubscriptionManager: ObservableObject {
         }
     }
 
+    /// Clears the restore result message once its confirmation UI is dismissed.
+    func clearRestoreMessage() {
+        restoreMessager = nil
+    }
+
     // MARK: - Updating Tier
 
     func attach(purchaseService: StoreKitPurchaseService) {
         self.purchaseService = purchaseService
+
+        // Transaction.updates (renewal, refund, external purchase) -> re-check
+        // everything through the single reconcile path.
+        purchaseService.onEntitlementChanged = { [weak self] transaction in
+            await self?.reconcileEntitlements(using: transaction)
+        }
     }
 
     func upgradeToPro() async {
@@ -130,8 +141,7 @@ final class SubscriptionManager: ObservableObject {
         do {
             let purchased = try await purchaseService.purchasePro()
             if purchased {
-                let tier = try await SubscriptionValidationService.syncTierFromServer()
-                setTierLocally(tier)
+                await reconcileEntitlements()
                 shouldPresentPaywall = false
             }
         }
@@ -151,6 +161,23 @@ final class SubscriptionManager: ObservableObject {
     /// Refreshes the Pro renewal/expiration date from StoreKit.
     func refreshProExpirationDate() async {
         proExpirationDate = await purchaseService?.currentProExpirationDate()
+    }
+
+    /// Resolves which account-deletion warning to show, based on the user's
+    /// current subscription and StoreKit auto-renewal status.
+    func accountDeletionState() async -> AccountDeletionSubscriptionState {
+        guard currentTier == .pro, let purchaseService else { return .free }
+
+        switch await purchaseService.currentProAutoRenewStatus() {
+        case .some(true):
+            return .premiumAutoRenewing
+        case .some(false):
+            return .premiumExpiring
+        case .none:
+            // Cached Pro but no active StoreKit entitlement: no billing concern,
+            // fall back to the standard data-deletion warning.
+            return .free
+        }
     }
 
     func loadProductsIfNeeded() async {
@@ -210,6 +237,65 @@ final class SubscriptionManager: ObservableObject {
             .execute()
     }
 
+    // MARK - Entitlement Reconciliation
+
+    // Single point of truth for entitlement status
+    // Scans StoreKit, validate/sync with server, apply local tier
+    // Called on app launch, and later expiry timer
+    func reconcileEntitlements(
+        using deliveredTransaction: VerificationResult<StoreKit.Transaction>? = nil
+    ) async {
+        guard supabase.auth.currentSession != nil,
+            let purchaseService else { return }
+
+        let transaction: VerificationResult<StoreKit.Transaction>?
+
+        if let deliveredTransaction {
+            transaction = deliveredTransaction
+        } else {
+            transaction = await purchaseService.currentProEntitlement()
+        }
+
+        do {
+            if let transaction {
+                try await SubscriptionValidationService.validateOnServer(
+                    transaction: transaction
+                )
+            }
+
+            let tier = try await SubscriptionValidationService.syncTierFromServer()
+            setTierLocally(tier)
+        } catch {
+            // Preserve the last known entitlement during transient failures.
+            print("Entitlement reconciliation failed:", error)
+        }
+
+        await refreshProExpirationDate()
+        scheduleExpiryCheck()
+    }
+
+    private func scheduleExpiryCheck() {
+        expiryTimerTask?.cancel()
+        expiryTimerTask = nil
+
+        guard currentTier == .pro,
+              let expiration = proExpirationDate else { return }
+        
+        let fireDate = expiration.addingTimeInterval(30) // 30second buffer after expiration to prevent race conditions
+        let delay = fireDate.timeIntervalSinceNow
+        guard delay > 0 else { 
+            // Already past expiry - reconcile immediately 
+            Task { await reconcileEntitlements() }
+            return
+        }
+
+        expiryTimerTask = Task {
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            await reconcileEntitlements()
+        }
+    }
+
     // MARK: - Private
 
     private func pushTierToCloud(_ tier: SubscriptionTier) {
@@ -262,31 +348,48 @@ final class SubscriptionManager: ObservableObject {
     }
 
     // Returns the subscription tier for the user, or nil if no subscription exists.
-    private func resolveSignInOutcome(userId: UUID) async -> SignInSubscriptionOutcome {
+    private func subscriptionRowExists(userId: UUID) async -> Bool {
         do {
-            let row: SubscriptionRow = try await supabase
+            _ = try await supabase
                 .from("subscriptions")
-                .select()
+                .select("uid")          // minimal column
                 .eq("uid", value: userId)
                 .single()
                 .execute()
-                .value
-        
-            setTierLocally(row.tier)
-            print("Same user, same tier:", row.tier)
-            return .existingUser(tier: row.tier)
+            return false   // row exists → existing user
         } catch where isNoRowsError(error) {
-            // await createFreeSubscription()
-            let tier = (try? await SubscriptionValidationService.syncTierFromServer()) ?? .free
-            setTierLocally(tier)
-            return .newUser(tier: tier)
-        }
-        catch {
-            print("Subscription fetch failed, using local cache: \(error)")
-            // current tier staus whatever UserDefaults has
-            return .fetchFailedUsedCache
+            print("No row found, new user")
+            return true    // no row → new user
+        } catch {
+            print("Subscription fetch failed, using local cache")
+            return false   // fetch failed → treat as existing (no paywall); reconcile uses cache/StoreKit
         }
     }
+    // private func resolveSignInOutcome(userId: UUID) async -> SignInSubscriptionOutcome {
+    //     do {
+    //         let row: SubscriptionRow = try await supabase
+    //             .from("subscriptions")
+    //             .select()
+    //             .eq("uid", value: userId)
+    //             .single()
+    //             .execute()
+    //             .value
+        
+    //         setTierLocally(row.tier)
+    //         print("Same user, same tier:", row.tier)
+    //         return .existingUser(tier: row.tier)
+    //     } catch where isNoRowsError(error) {
+    //         // await createFreeSubscription()
+    //         let tier = (try? await SubscriptionValidationService.syncTierFromServer()) ?? .free
+    //         setTierLocally(tier)
+    //         return .newUser(tier: tier)
+    //     }
+    //     catch {
+    //         print("Subscription fetch failed, using local cache: \(error)")
+    //         // current tier staus whatever UserDefaults has
+    //         return .fetchFailedUsedCache
+    //     }
+    // }
 
     // Helper to check if a Supabase error is due to no rows found.
     private func isNoRowsError(_ error: Error) -> Bool {

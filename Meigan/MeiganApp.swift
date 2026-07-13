@@ -13,6 +13,7 @@ struct MeiganApp: App {
     @StateObject private var settings = SettingsManager()
     @StateObject private var subscriptions = SubscriptionManager()
     @StateObject private var purchaseService = StoreKitPurchaseService()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -22,16 +23,8 @@ struct MeiganApp: App {
                 .environmentObject(subscriptions)
                 .onAppear {
                     // Attach StoreKit to subscription orchestration
+                    // (also wires Transaction.updates -> reconcileEntitlements)
                     subscriptions.attach(purchaseService: purchaseService)
-
-                    // Live entitlement updates -> sync tier + Supabase
-                    purchaseService.onEntitlementChanged = { [weak subscriptions] _ in
-                        Task { 
-                            if let tier = try? await SubscriptionValidationService.syncTierFromServer() {
-                                subscriptions?.setTierLocally(tier)
-                            }
-                        }
-                    }
 
                     // Existing auth wiring
                     appSession.settingsManager = settings
@@ -45,6 +38,12 @@ struct MeiganApp: App {
                         await subscriptions.loadProductsIfNeeded()
                     }
 
+                }
+                .onChange(of: scenePhase) { phase in
+                    guard phase == .active else { return }
+                    Task {
+                        await subscriptions.reconcileEntitlements()
+                    }
                 }
         }
     }
