@@ -409,6 +409,16 @@ struct ARMeasurementView: View {
                 showUpgradePaywall = false
                 featureLockPrompt = nil
             }
+            else if tier == .free {
+                // If the user is on the free tier and the selected feature is a pro feature, show the feature lock prompt
+                // and navigate user back to ruler
+                if selectedFeature.isProFeature {
+                    let lockedFeature = selectedFeature
+                    isFlattenScanActive = false
+                    selectedFeature = .ruler
+                    featureLockPrompt = .upgrade(lockedFeature)
+                }
+            }
         }
         .onChange(of: isCoachingActive) { active in
             if active {

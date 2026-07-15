@@ -139,9 +139,11 @@ final class SubscriptionManager: ObservableObject {
         guard let purchaseService else { return }
 
         do {
-            let purchased = try await purchaseService.purchasePro()
-            if purchased {
-                await reconcileEntitlements()
+            if let purchasedTransaction = try await purchaseService.purchasePro() {
+                await reconcileEntitlements(
+                    using: purchasedTransaction,
+                    transactionAlreadyValidated: true
+                )
                 shouldPresentPaywall = false
             }
         }
@@ -243,7 +245,8 @@ final class SubscriptionManager: ObservableObject {
     // Scans StoreKit, validate/sync with server, apply local tier
     // Called on app launch, and later expiry timer
     func reconcileEntitlements(
-        using deliveredTransaction: VerificationResult<StoreKit.Transaction>? = nil
+        using deliveredTransaction: VerificationResult<StoreKit.Transaction>? = nil,
+        transactionAlreadyValidated: Bool = false
     ) async {
         guard supabase.auth.currentSession != nil,
             let purchaseService else { return }
@@ -257,24 +260,46 @@ final class SubscriptionManager: ObservableObject {
         }
 
         do {
-            if let transaction {
+            if let transaction, !transactionAlreadyValidated {
                 try await SubscriptionValidationService.validateOnServer(
                     transaction: transaction
                 )
             }
 
             let tier = try await SubscriptionValidationService.syncTierFromServer()
+            print("Synced tier from server:", tier)
             setTierLocally(tier)
         } catch {
             // Preserve the last known entitlement during transient failures.
             print("Entitlement reconciliation failed:", error)
         }
 
-        await refreshProExpirationDate()
+        if let transaction,
+           case .verified(let verifiedTransaction) = transaction {
+            proExpirationDate = verifiedTransaction.expirationDate
+        } else if let expiration = await purchaseService.currentProExpirationDate() {
+            proExpirationDate = expiration
+        } else if currentTier != .pro {
+            proExpirationDate = nil
+        }
+
+        print(
+            "After refresh — tier:",
+            currentTier,
+            "expiration:",
+            proExpirationDate as Any
+        )
         scheduleExpiryCheck()
     }
 
     private func scheduleExpiryCheck() {
+
+        print(
+            "scheduleExpiryCheck entered — tier:",
+            currentTier,
+            "expiration:",
+            proExpirationDate as Any
+        )
         expiryTimerTask?.cancel()
         expiryTimerTask = nil
 
@@ -289,9 +314,16 @@ final class SubscriptionManager: ObservableObject {
             return
         }
 
+        print("Expiry check scheduled:", fireDate)
+
         expiryTimerTask = Task {
             try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else {
+                print("Expiry timer cancelled")
+                return
+            }
+
+            print("Expiry timer fired")
             await reconcileEntitlements()
         }
     }

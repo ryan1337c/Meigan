@@ -21,7 +21,7 @@ protocol SubscriptionPurchasing: AnyObject {
     var proPriceLabel: String? { get }
 
     func loadProducts() async 
-    func purchasePro() async throws -> Bool
+    func purchasePro() async throws -> VerificationResult<Transaction>?
     func restorePurchases() async throws -> Bool
     func hasActiveProEntitlement() async throws -> Bool
     func currentProExpirationDate() async -> Date?
@@ -71,7 +71,7 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
 
     // MARK: - Purchase
 
-    func purchasePro() async throws -> Bool {
+    func purchasePro() async throws -> VerificationResult<Transaction>? {
         if proProduct == nil {
             await loadProducts()
         }
@@ -85,17 +85,20 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
         switch result {
             case .success(let verification):
                 let transaction = try checkVerified(verification)
+
+                 print("Purchase expiration:", transaction.expirationDate as Any)
+                 
                 // Strict validation: 409 / overlap errors surface to the paywall.
                 // On failure the transaction stays unfinished so StoreKit retries.
                 try await SubscriptionValidationService.validateOnServer(transaction: verification)
                 await transaction.finish()
-                return true
+                return verification
 
             case .userCancelled, .pending:
-                return false
+                return nil
             
             @unknown default:
-                return false
+                return nil
         }
     }
 
