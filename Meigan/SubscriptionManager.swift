@@ -119,6 +119,11 @@ final class SubscriptionManager: ObservableObject {
         restoreMessager = nil
     }
 
+    /// Clears a purchase/restore error when the paywall is dismissed.
+    func clearPurchaseError() {
+        purchaseError = nil
+    }
+
     // MARK: - Updating Tier
 
     func attach(purchaseService: StoreKitPurchaseService) {
@@ -267,7 +272,6 @@ final class SubscriptionManager: ObservableObject {
             }
 
             let tier = try await SubscriptionValidationService.syncTierFromServer()
-            print("Synced tier from server:", tier)
             setTierLocally(tier)
         } catch {
             // Preserve the last known entitlement during transient failures.
@@ -283,23 +287,12 @@ final class SubscriptionManager: ObservableObject {
             proExpirationDate = nil
         }
 
-        print(
-            "After refresh — tier:",
-            currentTier,
-            "expiration:",
-            proExpirationDate as Any
-        )
         scheduleExpiryCheck()
     }
 
     private func scheduleExpiryCheck() {
 
-        print(
-            "scheduleExpiryCheck entered — tier:",
-            currentTier,
-            "expiration:",
-            proExpirationDate as Any
-        )
+
         expiryTimerTask?.cancel()
         expiryTimerTask = nil
 
@@ -314,16 +307,16 @@ final class SubscriptionManager: ObservableObject {
             return
         }
 
-        print("Expiry check scheduled:", fireDate)
+
 
         expiryTimerTask = Task {
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else {
-                print("Expiry timer cancelled")
+
                 return
             }
 
-            print("Expiry timer fired")
+
             await reconcileEntitlements()
         }
     }
@@ -377,6 +370,7 @@ final class SubscriptionManager: ObservableObject {
 
     func skipPaywall() {
         shouldPresentPaywall = false
+        clearPurchaseError()
     }
 
     // Returns the subscription tier for the user, or nil if no subscription exists.

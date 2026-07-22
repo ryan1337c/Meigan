@@ -21,7 +21,7 @@
     "_billingGracePeriodEnabled" : false,
     "_billingIssuesEnabled" : false,
     "_compatibilityTimeRate" : {
-      "3" : 6
+      "3" : 5
     },
     "_disableDialogs" : false,
     "_failTransactionsEnabled" : false,
@@ -31,7 +31,7 @@
     "_storeKitErrors" : [
 
     ],
-    "_timeRate" : 1003
+    "_timeRate" : 1000
   },
   "subscriptionGroups" : [
     {

@@ -45,6 +45,7 @@ struct ContentView: View {
                     priceLabel: subscriptions.proPriceLabel,
                     isPurchasing: subscriptions.isPurchasing,
                     errorMessage: subscriptions.purchaseError,
+                    currentTier: subscriptions.currentTier,
                     isRestoring: subscriptions.isRestoring,
                     onRestore: {
                         Task { await subscriptions.restorePurchases() }

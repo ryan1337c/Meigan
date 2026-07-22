@@ -5,6 +5,7 @@ import Combine
 enum StoreKitPurchaseError: LocalizedError {
     case productNotFound
     case unverifiedTransaction
+    case appleIDAlreadyLinked
 
     var errorDescription: String? {
         switch self {
@@ -12,6 +13,8 @@ enum StoreKitPurchaseError: LocalizedError {
             return "Pro plan is unavailable right now. Please try again later."
         case .unverifiedTransaction:
             return "Purchase could not be verified. Please contact support."
+        case .appleIDAlreadyLinked:
+            return "This Apple ID is already linked to another account."
         }
     }
 }
@@ -72,6 +75,13 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
     // MARK: - Purchase
 
     func purchasePro() async throws -> VerificationResult<Transaction>? {
+        // Checks if apple id is already linked to another account
+        print("Checking if apple id is already linked to another account")
+        if await currentProEntitlement() != nil {
+            print("Apple id is already linked to another account - from local")
+            throw StoreKitPurchaseError.appleIDAlreadyLinked
+        }
+        
         if proProduct == nil {
             await loadProducts()
         }

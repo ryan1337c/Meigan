@@ -190,11 +190,14 @@ struct AccountView: View {
         .navigationDestination(isPresented: $showChangePassword) {
             ChangePasswordView()
         }
-        .fullScreenCover(isPresented: $showUpdatePaywall) {
+        .fullScreenCover(isPresented: $showUpdatePaywall, onDismiss: {
+            subscriptions.clearPurchaseError()
+        }) {
             SubscriptionPaywallView(
                 priceLabel: subscriptions.proPriceLabel,
                 isPurchasing: subscriptions.isPurchasing,
                 errorMessage: subscriptions.purchaseError,
+                currentTier: subscriptions.currentTier,
                 isRestoring: subscriptions.isRestoring,
                 onRestore: {
                     Task { 

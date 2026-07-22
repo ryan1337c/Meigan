@@ -15,6 +15,7 @@ struct SubscriptionPaywallView: View {
     var priceLabel: String?
     var isPurchasing: Bool = false
     var errorMessage: String?
+    var currentTier: SubscriptionTier = .free
 
     // Restore purchases
     var isRestoring: Bool = false
@@ -27,6 +28,7 @@ struct SubscriptionPaywallView: View {
 
     private static let termsURL = URL(string: "https://meigan.app/terms")!
     private static let privacyURL = URL(string: "https://meigan.app/privacy")!
+    private var isSelectedPlanActive: Bool { currentTier == .pro }
 
     struct FeatureItem {
         let symbol: String
@@ -170,10 +172,14 @@ struct SubscriptionPaywallView: View {
     private var footer: some View {
         VStack(spacing: 14) {
             Button {
+                guard !isSelectedPlanActive else { return }
                 onSelectPro()
             } label: {
                 Group {
-                    if isPurchasing {
+                    if isSelectedPlanActive {
+                        Text("Currently Active")
+                            .font(.headline)
+                    } else if isPurchasing {
                         ProgressView()
                             .tint(.white)
                     } else {
@@ -187,8 +193,8 @@ struct SubscriptionPaywallView: View {
             .foregroundColor(.white)
             .background(Color.accentColor)
             .clipShape(Capsule())
-            .disabled(isPurchasing || priceLabel == nil)
-            .opacity(priceLabel == nil ? 0.5 : 1)
+            .disabled(isSelectedPlanActive || isPurchasing || priceLabel == nil)
+            .opacity(isSelectedPlanActive || priceLabel == nil ? 0.5 : 1)
 
             Button("Restore Purchases") {
                 onRestore()
@@ -244,6 +250,16 @@ struct SubscriptionPaywallView: View {
     SubscriptionPaywallView(
         priceLabel: "$4.99 / year",
         isPurchasing: true,
+        onRestore: {},
+        onSkip: {},
+        onSelectPro: {}
+    )
+}
+
+#Preview("Currently Active") {
+    SubscriptionPaywallView(
+        priceLabel: "$4.99 / year",
+        currentTier: .pro,
         onRestore: {},
         onSkip: {},
         onSelectPro: {}

@@ -334,11 +334,14 @@ struct ARMeasurementView: View {
                     }
                 }
                 .animation(.easeInOut(duration: 0.22), value: featureLockPrompt)
-                .fullScreenCover(isPresented: $showUpgradePaywall) {
+                .fullScreenCover(isPresented: $showUpgradePaywall, onDismiss: {
+                    subscriptions.clearPurchaseError()
+                }) {
                     SubscriptionPaywallView(
                         priceLabel: subscriptions.proPriceLabel,
                         isPurchasing: subscriptions.isPurchasing,
                         errorMessage: subscriptions.purchaseError,
+                        currentTier: subscriptions.currentTier,
                         isRestoring: subscriptions.isRestoring,
                         onRestore: {
                             Task { await subscriptions.restorePurchases() }
