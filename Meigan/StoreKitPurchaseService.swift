@@ -74,14 +74,7 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
 
     // MARK: - Purchase
 
-    func purchasePro() async throws -> VerificationResult<Transaction>? {
-        // Checks if apple id is already linked to another account
-        print("Checking if apple id is already linked to another account")
-        if await currentProEntitlement() != nil {
-            print("Apple id is already linked to another account - from local")
-            throw StoreKitPurchaseError.appleIDAlreadyLinked
-        }
-        
+    func purchasePro() async throws -> VerificationResult<Transaction>? {    
         if proProduct == nil {
             await loadProducts()
         }

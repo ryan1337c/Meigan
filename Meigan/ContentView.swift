@@ -64,19 +64,6 @@ struct ContentView: View {
                         .navigationTitle("")
                         .navigationBarTitleDisplayMode(.inline)
                 }
-                // SubscriptionPaywallView(
-                //     priceLabel: subscriptions.proPriceLabel,
-                //     isPurchasing: subscriptions.isPurchasing,
-                //     errorMessage: subscriptions.purchaseError,
-                //     onSkip: {
-                //         subscriptions.skipPaywall()
-                //     },
-                //     onSelectPro: {
-                //         Task { await subscriptions.upgradeToPro() }
-                //     }
-                // )
-                // .task { await subscriptions.loadProductsIfNeeded() }
-
             }
         }
     }
