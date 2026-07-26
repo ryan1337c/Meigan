@@ -52,6 +52,11 @@ private enum FeatureLockPrompt: Equatable, Identifiable {
     }
 }
 
+private struct SharePayload: Identifiable {
+    let id = UUID()
+    let image: UIImage
+}
+
 struct ARMeasurementView: View {
     @EnvironmentObject private var appSession: AppSession
     @EnvironmentObject private var settings: SettingsManager
@@ -88,8 +93,7 @@ struct ARMeasurementView: View {
     @State private var isFlattenScanActive = false
     @State private var flattenScanSigmas: [Float] = []
     @State private var flattenScanCornersReady = false
-    @State private var showShareSheet = false
-    @State private var shareSheetItems: [Any] = []
+    @State private var sharePayload: SharePayload?
     @State private var placementWarningMessage = ""
     @State private var placementWarningToken = 0
     @State private var placementBannerKind: PlacementBannerKind = .alert
@@ -304,13 +308,14 @@ struct ARMeasurementView: View {
                             image: preview,
                             onDismiss: { screenshotPreviewImage = nil },
                             onSave: {
-                                saveScreenshotToPhotoLibrary(preview) {
-                                    screenshotPreviewImage = nil
+                                saveScreenshotToPhotoLibrary(preview) { success in
+                                    if success {
+                                        screenshotPreviewImage = nil
+                                    }
                                 }
                             },
                             onShare: {
-                                shareSheetItems = [preview]
-                                showShareSheet = true
+                                sharePayload = SharePayload(image: preview)
                             }
                         )
                     }
@@ -325,24 +330,28 @@ struct ARMeasurementView: View {
                             findings: flattenShapeFindings,
                             detectionPreviewImage: flattenDetectionPreviewImage,
                             measurementUnit: MeasurementUnit.from(storage: settings.measurementUnit),
+                            photoSavedBannerMessage: photoSavedBannerMessage,
                             onDismiss: {
                                 flattenScanResultImage = nil
                                 flattenShapeFindings = []
                                 flattenDetectionPreviewImage = nil
                             },
                             onSave: { exportImage in
-                                saveScreenshotToPhotoLibrary(exportImage) {
-                                    flattenScanResultImage = nil
-                                    flattenShapeFindings = []
-                                    flattenDetectionPreviewImage = nil
+                                saveScreenshotToPhotoLibrary(exportImage) { success in
+                                    if success {
+                                        flattenScanResultImage = nil
+                                        flattenShapeFindings = []
+                                        flattenDetectionPreviewImage = nil
+                                    }
                                 }
                             },
                             onShare: { exportImage in
-                                shareSheetItems = [exportImage]
-                                showShareSheet = true
+                                sharePayload = SharePayload(image: exportImage)
                             },
-                            onSaveDetectionPreview: { previewImage in
-                                saveScreenshotToPhotoLibrary(previewImage) {}
+                            onSaveDetectionPreview: { previewImage, completion in
+                                saveScreenshotToPhotoLibrary(previewImage) { success in
+                                    completion(success)
+                                }
                             }
                         )
                     }
@@ -389,8 +398,8 @@ struct ARMeasurementView: View {
                     )
                     .task { await subscriptions.loadProductsIfNeeded() }
                 }
-                .sheet(isPresented: $showShareSheet, onDismiss: { shareSheetItems = [] }) {
-                    ActivityView(activityItems: shareSheetItems)
+                .sheet(item: $sharePayload) { payload in
+                    ActivityView(activityItems: [payload.image])
                 }
                 .navigationDestination(isPresented: $showAccount) {
                     AccountView()
@@ -484,15 +493,23 @@ struct ARMeasurementView: View {
     }
 
     /// Shared by AR screenshot preview and flatten scan result — banner + haptic only after a successful library save.
-    private func saveScreenshotToPhotoLibrary(_ image: UIImage, onSuccess: @escaping () -> Void) {
+    private func saveScreenshotToPhotoLibrary(_ image: UIImage, completion: @escaping (Bool) -> Void) {
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
-            guard status == .authorized || status == .limited else { return }
+            guard status == .authorized || status == .limited else {
+                DispatchQueue.main.async {
+                    completion(false)
+                }
+                return
+            }
             PHPhotoLibrary.shared().performChanges {
                 PHAssetChangeRequest.creationRequestForAsset(from: image)
             } completionHandler: { success, _ in
                 DispatchQueue.main.async {
-                    guard success else { return }
-                    onSuccess()
+                    guard success else {
+                        completion(false)
+                        return
+                    }
+                    completion(true)
                     if settings.hapticFeedbackEnabled {
                         UINotificationFeedbackGenerator().notificationOccurred(.success)
                     }
@@ -527,43 +544,62 @@ private struct ScreenshotPreviewOverlay: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 VStack(spacing: 0) {
-                    Text(title)
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 20)
-                        .padding(.top, geo.safeAreaInsets.top + 12)
-                        .padding(.bottom, 14)
-                        .background(.ultraThinMaterial)
+                    ZStack {
+                        Text(title)
+                            .font(.headline)
 
-                    Spacer()
-
-                    VStack(spacing: 10) {
-                        HStack(spacing: 10) {
-                            Button {
-                                onShare()
-                            } label: {
-                                Text("Share")
-                                    .frame(maxWidth: .infinity)
+                        HStack {
+                            Button(action: onDismiss) {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .frame(width: 44, height: 44)
+                                    .background {
+                                        Circle()
+                                            .fill(.thinMaterial)
+                                    }
+                                    .overlay {
+                                        Circle()
+                                            .strokeBorder(.white.opacity(0.16), lineWidth: 1)
+                                    }
                             }
-                            .buttonStyle(.borderedProminent)
+                            .accessibilityLabel("Done")
 
-                            Button {
-                                onSave()
+                            Spacer()
+
+                            Menu {
+                                Button(action: onSave) {
+                                    Label("Save", systemImage: "square.and.arrow.down")
+                                }
+
+                                Button(action: onShare) {
+                                    Label("Share", systemImage: "square.and.arrow.up")
+                                }
+
+                                Divider()
+
+                                Button(role: .destructive, action: onDismiss) {
+                                    Label("Delete Screenshot", systemImage: "trash")
+                                }
                             } label: {
-                                Text("Save")
-                                    .frame(maxWidth: .infinity)
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 22, weight: .semibold))
+                                    .frame(width: 48, height: 48)
+                                    .background {
+                                        Circle()
+                                            .fill(Color.accentColor)
+                                            .shadow(color: Color.accentColor.opacity(0.35), radius: 10, y: 4)
+                                    }
                             }
-                            .buttonStyle(.bordered)
+                            .accessibilityLabel("Screenshot actions")
                         }
-
-                        Button("Done", action: onDismiss)
-                            .buttonStyle(.bordered)
-                            .frame(maxWidth: .infinity)
                     }
                     .padding(.horizontal, 20)
-                    .padding(.top, 14)
-                    .padding(.bottom, geo.safeAreaInsets.bottom + 16)
+                    .padding(.top, geo.safeAreaInsets.top + 12)
+                    .padding(.bottom, 12)
                     .background(.ultraThinMaterial)
+
+                    Spacer()
+                        .allowsHitTesting(false)
                 }
                 .foregroundStyle(.white)
             }
@@ -572,13 +608,14 @@ private struct ScreenshotPreviewOverlay: View {
     }
 }
 
-/// DEBUG sheet showing the grayscale bitmap passed to `VNDetectContoursRequest`.
-#if DEBUG
+/// Sheet showing the grayscale bitmap passed to `VNDetectContoursRequest`.
 private struct FlattenDetectionPreviewSheet: View {
     let image: UIImage
-    let onSave: () -> Void
+    let onSave: (@escaping (Bool) -> Void) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @State private var isSaving = false
+    @State private var showsSaveError = false
 
     var body: some View {
         NavigationStack {
@@ -605,13 +642,35 @@ private struct FlattenDetectionPreviewSheet: View {
                     Button("Close") { dismiss() }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button("Save to Photos", action: onSave)
+                    Button {
+                        guard !isSaving else { return }
+                        isSaving = true
+                        onSave { success in
+                            isSaving = false
+                            if success {
+                                dismiss()
+                            } else {
+                                showsSaveError = true
+                            }
+                        }
+                    } label: {
+                        if isSaving {
+                            ProgressView()
+                        } else {
+                            Text("Save to Photos")
+                        }
+                    }
+                    .disabled(isSaving)
                 }
+            }
+            .alert("Unable to Save Photo", isPresented: $showsSaveError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Check Meigan's Photos access in Settings, then try again.")
             }
         }
     }
 }
-#endif
 
 struct IdentifyAnnotationOverlay: View {
     let detections: [IdentifyDetection]
@@ -646,10 +705,11 @@ private struct FlattenWarpResultInspectOverlay: View {
     let findings: [FlattenShapeFinding]
     let detectionPreviewImage: UIImage?
     let measurementUnit: MeasurementUnit
+    let photoSavedBannerMessage: String?
     let onDismiss: () -> Void
     let onSave: (UIImage) -> Void
     let onShare: (UIImage) -> Void
-    var onSaveDetectionPreview: ((UIImage) -> Void)?
+    var onSaveDetectionPreview: ((UIImage, @escaping (Bool) -> Void) -> Void)?
 
     @State private var selectedFindingId: UUID?
     @State private var showsDetectionPreviewSheet = false
@@ -728,75 +788,104 @@ private struct FlattenWarpResultInspectOverlay: View {
                 .frame(width: geo.size.width, height: geo.size.height)
 
                 VStack(spacing: 0) {
-                    Text("Flattened Surface")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 20)
-                        .padding(.top, geo.safeAreaInsets.top + 12)
-                        .padding(.bottom, 14)
-                        .background(.ultraThinMaterial)
+                    ZStack {
+                        Text("Flattened Surface")
+                            .font(.headline)
+
+                        HStack {
+                            Button(action: onDismiss) {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .frame(width: 44, height: 44)
+                                    .background {
+                                        Circle()
+                                            .fill(.thinMaterial)
+                                    }
+                                    .overlay {
+                                        Circle()
+                                            .strokeBorder(.white.opacity(0.16), lineWidth: 1)
+                                    }
+                            }
+                            .accessibilityLabel("Done")
+
+                            Spacer()
+
+                            Menu {
+                                Button {
+                                    onSave(exportImageForAlbum())
+                                } label: {
+                                    Label("Save", systemImage: "square.and.arrow.down")
+                                }
+
+                                Button {
+                                    onShare(exportImageForAlbum())
+                                } label: {
+                                    Label("Share", systemImage: "square.and.arrow.up")
+                                }
+
+                                if detectionPreviewImage != nil {
+                                    Button {
+                                        showsDetectionPreviewSheet = true
+                                    } label: {
+                                        Label("Vision Input", systemImage: "viewfinder")
+                                    }
+                                }
+
+                                Divider()
+
+                                Button(role: .destructive, action: onDismiss) {
+                                    Label("Delete Screenshot", systemImage: "trash")
+                                }
+                            } label: {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 22, weight: .semibold))
+                                    .frame(width: 48, height: 48)
+                                    .background {
+                                        Circle()
+                                            .fill(Color.accentColor)
+                                            .shadow(color: Color.accentColor.opacity(0.35), radius: 10, y: 4)
+                                    }
+                            }
+                            .accessibilityLabel("Result actions")
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, geo.safeAreaInsets.top + 12)
+                    .padding(.bottom, 12)
+                    .background(.ultraThinMaterial)
+
+                    if let photoSavedBannerMessage {
+                        TopDownNoticeBanner(message: photoSavedBannerMessage)
+                            .padding(.horizontal, 20)
+                            .padding(.top, 12)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                            .zIndex(10)
+                    }
 
                     Spacer()
                         .allowsHitTesting(false)
-
-                    VStack(spacing: 10) {
-                        #if DEBUG
-                        if detectionPreviewImage != nil {
-                            Button {
-                                showsDetectionPreviewSheet = true
-                            } label: {
-                                Text("Vision Input")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                        #endif
-
-                        HStack(spacing: 10) {
-                            Button {
-                                onShare(exportImageForAlbum())
-                            } label: {
-                                Text("Share")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.borderedProminent)
-
-                            Button {
-                                onSave(exportImageForAlbum())
-                            } label: {
-                                Text("Save")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.bordered)
-                        }
-
-                        Button("Done", action: onDismiss)
-                            .buttonStyle(.bordered)
-                            .frame(maxWidth: .infinity)
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.top, 14)
-                    .padding(.bottom, geo.safeAreaInsets.bottom + 16)
-                    .background(.ultraThinMaterial)
                 }
                 .foregroundStyle(.white)
+                .animation(.spring(response: 0.38, dampingFraction: 0.86), value: photoSavedBannerMessage)
             }
             .ignoresSafeArea()
             .onChange(of: findings) { _ in
                 selectedFindingId = nil
             }
-            #if DEBUG
             .sheet(isPresented: $showsDetectionPreviewSheet) {
                 if let detectionPreviewImage {
                     FlattenDetectionPreviewSheet(
                         image: detectionPreviewImage,
-                        onSave: {
-                            onSaveDetectionPreview?(detectionPreviewImage)
+                        onSave: { completion in
+                            guard let onSaveDetectionPreview else {
+                                completion(false)
+                                return
+                            }
+                            onSaveDetectionPreview(detectionPreviewImage, completion)
                         }
                     )
                 }
             }
-            #endif
         }
     }
 

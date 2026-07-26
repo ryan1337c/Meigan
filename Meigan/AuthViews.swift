@@ -142,14 +142,6 @@ struct LoginView: View {
             errorMessage = nil
             isLoading = false
         }
-        #if DEBUG
-        .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button("Skip") { appSession.continueAsGuest() }
-                    .font(.subheadline)
-            }
-        }
-        #endif
     }
 
     // MARK: - Actions
