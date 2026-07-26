@@ -104,6 +104,8 @@ private enum MeasurementLabelStyle {
 }
 
 struct ARSceneView: UIViewRepresentable {
+    /// When true, pauses camera capture and the update loop without destroying the AR view (e.g. settings sheet).
+    var isSessionPaused: Bool
     @Binding var isCoachingActive: Bool
     @Binding var isRelocalizing: Bool
     @Binding var hasValidTarget: Bool
@@ -144,6 +146,7 @@ struct ARSceneView: UIViewRepresentable {
         weak var coachingOverlay: ARCoachingOverlayView?
         var updateSubscription: Cancellable?
         private var hasCompletedCoachingOnce = false
+        private var appliedSessionPaused = false
         @Binding var hasValidTarget: Bool
         @Binding var measurementReadout: String
         @Binding var markCount: Int
@@ -419,19 +422,63 @@ struct ARSceneView: UIViewRepresentable {
         /// Stops the per-frame loop, pauses ARKit, and detaches delegates so navigating away from the
         /// AR view doesn't keep camera capture, plane detection, or scene mesh generation running.
         func teardownSession() {
-            updateSubscription?.cancel()
-            updateSubscription = nil
-            cancelTrackingGuideTransition()
+            appliedSessionPaused = false
+            pauseSession()
             flattenScanOccludesPlacementChrome = false
 
             if let arView {
                 arView.session.delegate = nil
-                arView.session.pause()
             }
 
             if let overlay = coachingOverlay {
                 overlay.delegate = nil
                 overlay.session = nil
+            }
+        }
+
+        /// Pauses capture and per-frame work while keeping the AR view alive (settings, paywall, etc.).
+        func pauseSession() {
+            updateSubscription?.cancel()
+            updateSubscription = nil
+            cancelTrackingGuideTransition()
+            hideRingForSessionReset()
+            arView?.session.pause()
+        }
+
+        /// Resumes a paused session without resetting world tracking or measurements.
+        func resumeSession() {
+            guard let arView else { return }
+
+            hideRingForSessionReset()
+
+            if arView.session.delegate == nil {
+                arView.session.delegate = self
+            }
+
+            if let overlay = coachingOverlay {
+                if overlay.session == nil {
+                    overlay.session = arView.session
+                }
+                if overlay.delegate == nil {
+                    overlay.delegate = self
+                }
+            }
+
+            let configuration = ARSceneView.makeWorldTrackingConfiguration()
+            arView.session.run(configuration)
+
+            if updateSubscription == nil {
+                startUpdateLoop()
+            }
+        }
+
+        func syncSessionPausedIfNeeded(_ paused: Bool) {
+            guard paused != appliedSessionPaused else { return }
+            appliedSessionPaused = paused
+            if paused {
+                pauseSession()
+            } else {
+                resumeSession()
             }
         }
 
@@ -2212,39 +2259,39 @@ struct ARSceneView: UIViewRepresentable {
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
 
-        let configuration = Self.makeWorldTrackingConfiguration()
-        arView.session.run(configuration)
-
-        DispatchQueue.main.async {
-            context.coordinator.hasValidTarget = false
-        }
-
         context.coordinator.arView = arView
         context.coordinator.appliedTrackingGuideShowThreshold = trackingGuideShowThreshold
         context.coordinator.setupRingEntity(in: arView)
         context.coordinator.setupMeasurementEntities(in: arView)
-        context.coordinator.startUpdateLoop()
 
         let coachingOverlay = ARCoachingOverlayView()
         coachingOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        coachingOverlay.session = arView.session
         coachingOverlay.goal = .anyPlane
         coachingOverlay.delegate = context.coordinator
-
         coachingOverlay.frame = arView.bounds
         arView.addSubview(coachingOverlay)
         context.coordinator.coachingOverlay = coachingOverlay
 
         arView.session.delegate = context.coordinator
+        coachingOverlay.session = arView.session
+
+        if isSessionPaused {
+            context.coordinator.syncSessionPausedIfNeeded(true)
+        } else {
+            let configuration = Self.makeWorldTrackingConfiguration()
+            arView.session.run(configuration)
+            context.coordinator.startUpdateLoop()
+        }
+
+        DispatchQueue.main.async {
+            context.coordinator.hasValidTarget = false
+        }
 
         return arView
     }
 
     func updateUIView(_ uiView: ARView, context: Context) {
-        // Log representable’s current bindings (source of truth from SwiftUI) vs coordinator reads inside sync.
-        // arPlacementLog.debug(
-        //     "updateUIView: representable placeMarkToken=\(placeMarkToken) clearMarksToken=\(clearMarksToken)"
-        // )
+        context.coordinator.syncSessionPausedIfNeeded(isSessionPaused)
         context.coordinator.appliedMeasurementModeRaw = measurementModeRaw
         context.coordinator.appliedTrackingGuideShowThreshold = trackingGuideShowThreshold
         context.coordinator.syncMeasurementModeFromSwiftUI(measurementModeRaw)
@@ -2262,7 +2309,8 @@ struct ARSceneView: UIViewRepresentable {
 
 #Preview {
     ARSceneView(
-        isCoachingActive: .constant(true),
+        isSessionPaused: false,
+        isCoachingActive: .constant(false),
         isRelocalizing: .constant(false),
         hasValidTarget: .constant(false),
         measurementReadout: .constant("—"),

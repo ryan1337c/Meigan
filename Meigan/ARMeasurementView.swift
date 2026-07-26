@@ -53,19 +53,22 @@ private enum FeatureLockPrompt: Equatable, Identifiable {
 }
 
 struct ARMeasurementView: View {
-    @AppStorage("hasSeenExplainer") private var hasSeenExplainer = false
     @EnvironmentObject private var appSession: AppSession
     @EnvironmentObject private var settings: SettingsManager
     @EnvironmentObject private var subscriptions: SubscriptionManager
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
 
-    @State private var showExplainer = false
+    @State private var cameraGatePhase: CameraAccessGatePhase = CameraAccessGateResolver.resolve(
+        status: SystemCameraAuthorizationService().status,
+        isRequesting: false
+    )
+    @State private var isRequestingCameraAccess = false
     @State private var showAccount = false
     @State private var showSettings = false
     @State private var featureLockPrompt: FeatureLockPrompt?
     @State private var showUpgradePaywall = false
-    @State private var isCoachingActive = true
+    @State private var isCoachingActive = false
     @State private var isRelocalizing = false
     @State private var hasValidTarget = false
 
@@ -105,6 +108,8 @@ struct ARMeasurementView: View {
     // Simple trigger to recreate/reset the AR view
     @State private var arSessionResetID = UUID()
 
+    private let cameraAuthorization: any CameraAuthorizing = SystemCameraAuthorizationService()
+
     private var hasPinnedMeasurementPoints: Bool {
         switch selectedFeature {
         case .ruler:
@@ -125,14 +130,41 @@ struct ARMeasurementView: View {
         isPro ? [] : [.flatten, .identify]
     }
 
-    /// While the paywall/sign-in overlay is up we tear down ARKit so the camera,
-    /// plane detection, and per-frame work all stop until the user resumes.
+    /// Settings, account, and feature-lock flows pause ARKit in place (no remount).
     private var blocksARSession: Bool {
         showAccount || showSettings || featureLockPrompt != nil
     }
 
     private func refreshARSessionActive() {
-        isARSessionActive = (scenePhase == .active) && !blocksARSession
+        // Allow AR while `.inactive` (e.g. right after the camera permission sheet dismisses).
+        // Dismount only when the app is fully backgrounded; overlays pause via `isSessionPaused`.
+        isARSessionActive = cameraGatePhase == .ready
+            && scenePhase != .background
+    }
+
+    private func refreshCameraGate() {
+        cameraGatePhase = CameraAccessGateResolver.resolve(
+            status: cameraAuthorization.status,
+            isRequesting: isRequestingCameraAccess
+        )
+        refreshARSessionActive()
+    }
+
+    private func requestCameraAccess() {
+        guard !isRequestingCameraAccess else { return }
+        isRequestingCameraAccess = true
+        cameraGatePhase = .requesting
+
+        Task {
+            let granted = await cameraAuthorization.requestAccess()
+            isRequestingCameraAccess = false
+            cameraGatePhase = granted ? .ready : .denied
+            refreshARSessionActive()
+        }
+    }
+
+    private func openCameraSettings() {
+        cameraAuthorization.openAppSettings()
     }
 
     /// Routes a tap on a locked mode to the right prompt (guest → sign in, free → upgrade).
@@ -142,17 +174,18 @@ struct ARMeasurementView: View {
 
     var body: some View {
         Group {
-            if showExplainer {
-                ExplainerView(
-                    onStart: {
-                        hasSeenExplainer = true
-                        showExplainer = false
-                    }
+            if cameraGatePhase != .ready {
+                CameraAccessGateView(
+                    phase: cameraGatePhase,
+                    onRequestAccess: requestCameraAccess,
+                    onOpenSettings: openCameraSettings,
+                    onGoBack: { dismiss() }
                 )
             } else {
                 ZStack {
                     if isARSessionActive {
                         ARSceneView(
+                            isSessionPaused: blocksARSession,
                             isCoachingActive: $isCoachingActive,
                             isRelocalizing: $isRelocalizing,
                             hasValidTarget: $hasValidTarget,
@@ -380,10 +413,7 @@ struct ARMeasurementView: View {
             }
         }
         .onAppear {
-            if !hasSeenExplainer {
-                showExplainer = true
-            }
-            isARSessionActive = true
+            refreshCameraGate()
         }
         .onDisappear {
             isARSessionActive = false
@@ -394,8 +424,12 @@ struct ARMeasurementView: View {
             flattenDetectionPreviewImage = nil
             isFlattenScanActive = false
         }
-        .onChange(of: scenePhase) { _ in
-            refreshARSessionActive()
+        .onChange(of: scenePhase) { phase in
+            if phase == .active {
+                refreshCameraGate()
+            } else {
+                refreshARSessionActive()
+            }
         }
         .onChange(of: showAccount) { _ in
             refreshARSessionActive()
@@ -465,49 +499,6 @@ struct ARMeasurementView: View {
                     presentPhotoSavedBanner()
                 }
             }
-        }
-    }
-}
-
-// View for the explainer screen
-private struct ExplainerView: View {
-    let onStart: () -> Void // Called when user taps "Start Measuring"
-    var body: some View {
-        ZStack {
-            // Dimmed background
-            Color.black.opacity(0.4)
-                .ignoresSafeArea()
-
-            // Centered content
-            VStack(spacing: 16) {
-                Image("Logo")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 72, height: 72)
-
-                Text("Camera access needed")
-                    .font(.title2)
-                    .fontWeight(.semibold)
-
-                Text("Meigan uses your camera to measure distances in 3D space. iOS will ask for permission the first time you start measuring.")
-                    .font(.subheadline)
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-
-                Button {
-                    onStart()
-                } label: {
-                    Text("Start AR Measurement")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                }
-                .buttonStyle(.borderedProminent)
-            }
-            .padding(24)
-            .background(.thinMaterial)
-            .cornerRadius(20)
-            .padding(.horizontal, 24)
         }
     }
 }
