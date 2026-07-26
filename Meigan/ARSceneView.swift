@@ -209,6 +209,8 @@ struct ARSceneView: UIViewRepresentable {
         /// Mirrored from `ARSceneView.updateUIView` every frame. The coordinator’s `@Binding measurementModeRaw`
         /// is captured only once in `makeCoordinator` and can stay stale vs the parent’s custom `Binding` — use this for mode checks.
         var appliedMeasurementModeRaw: String = ARFooterFeature.ruler.rawValue
+        /// Mirrored from `ARSceneView.updateUIView` every frame for screenshot compositing.
+        var appliedIdentifyDetections: [IdentifyDetection] = []
         /// Mirrored from the representable each SwiftUI update so the RealityKit update thread never reads `@Binding`s.
         var appliedTrackingGuideShowThreshold: Int = 6
 
@@ -1467,10 +1469,89 @@ struct ARSceneView: UIViewRepresentable {
         private func captureScreenshotForPreview() {
             guard !placementBannerChromeMutedForFlattenCapture else { return }
             guard let arView = arView else { return }
+            let identifyAnnotations = isIdentifyMode ? appliedIdentifyDetections : []
+            let viewportSize = arView.bounds.size
             arView.snapshot(saveToHDR: false) { [weak self] image in
                 guard let self, let image else { return }
+                let previewImage = Self.drawingIdentifyAnnotations(
+                    identifyAnnotations,
+                    on: image,
+                    viewportSize: viewportSize
+                )
                 DispatchQueue.main.async {
-                    self.screenshotPreviewImage = image
+                    self.screenshotPreviewImage = previewImage
+                }
+            }
+        }
+
+        /// Composites the screen-space Identify overlay onto an AR snapshot.
+        /// Detection rectangles use ARView points, while the snapshot can have a
+        /// different logical size, so each axis is scaled independently.
+        private static func drawingIdentifyAnnotations(
+            _ detections: [IdentifyDetection],
+            on image: UIImage,
+            viewportSize: CGSize
+        ) -> UIImage {
+            guard !detections.isEmpty,
+                  image.size.width > 0, image.size.height > 0,
+                  viewportSize.width > 0, viewportSize.height > 0
+            else { return image }
+
+            let scaleX = image.size.width / viewportSize.width
+            let scaleY = image.size.height / viewportSize.height
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = image.scale
+            format.opaque = true
+            let renderer = UIGraphicsImageRenderer(size: image.size, format: format)
+
+            return renderer.image { context in
+                image.draw(in: CGRect(origin: .zero, size: image.size))
+
+                let cgContext = context.cgContext
+                let strokeWidth = 2 * min(scaleX, scaleY)
+
+                let baseFont = UIFont.preferredFont(forTextStyle: .caption2)
+                let font = UIFont.systemFont(
+                    ofSize: baseFont.pointSize * min(scaleX, scaleY),
+                    weight: .semibold
+                )
+                let horizontalPadding = 5 * scaleX
+                let verticalPadding = 2 * scaleY
+
+                for detection in detections {
+                    let rect = CGRect(
+                        x: detection.viewRect.minX * scaleX,
+                        y: detection.viewRect.minY * scaleY,
+                        width: detection.viewRect.width * scaleX,
+                        height: detection.viewRect.height * scaleY
+                    )
+                    // Text drawing mutates CGContext stroke/fill; reset green each iteration.
+                    cgContext.setStrokeColor(UIColor.green.cgColor)
+                    cgContext.setLineWidth(strokeWidth)
+                    cgContext.stroke(rect)
+
+                    let text = "\(detection.label) \(Int(detection.confidence * 100))%" as NSString
+                    let attributes: [NSAttributedString.Key: Any] = [
+                        .font: font,
+                        .foregroundColor: UIColor.black
+                    ]
+                    let textSize = text.size(withAttributes: attributes)
+                    let labelRect = CGRect(
+                        x: rect.minX,
+                        y: rect.minY - textSize.height - (verticalPadding * 2),
+                        width: textSize.width + (horizontalPadding * 2),
+                        height: textSize.height + (verticalPadding * 2)
+                    )
+
+                    cgContext.setFillColor(UIColor.green.cgColor)
+                    cgContext.fill(labelRect)
+                    text.draw(
+                        at: CGPoint(
+                            x: labelRect.minX + horizontalPadding,
+                            y: labelRect.minY + verticalPadding
+                        ),
+                        withAttributes: attributes
+                    )
                 }
             }
         }
@@ -2293,6 +2374,7 @@ struct ARSceneView: UIViewRepresentable {
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.syncSessionPausedIfNeeded(isSessionPaused)
         context.coordinator.appliedMeasurementModeRaw = measurementModeRaw
+        context.coordinator.appliedIdentifyDetections = identifyDetections
         context.coordinator.appliedTrackingGuideShowThreshold = trackingGuideShowThreshold
         context.coordinator.syncMeasurementModeFromSwiftUI(measurementModeRaw)
         context.coordinator.syncPlaceAndClearTokensIfNeeded(placeToken: placeMarkToken, clearToken: clearMarksToken)
