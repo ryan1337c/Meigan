@@ -12,6 +12,7 @@
 
 <p align="center">
   <a href="#key-features">Key Features</a> •
+  <a href="#demo">Demo</a> •
   <a href="#installation">Installation</a> •
   <a href="#how-to-use">How To Use</a> •
   <a href="#credits">Credits</a> •
@@ -42,6 +43,17 @@
   - Capture measurements and object-detection labels directly from the AR view.
 * Haptic Feedback
   - Receive tactile confirmation when placing measurement points.
+
+## Demo
+
+### Ruler Mode
+![Ruler Mode demo](https://github.com/user-attachments/assets/PASTE-RULER-ID)
+
+### Flatten Mode
+![Flatten Mode demo](https://github.com/user-attachments/assets/PASTE-FLATTEN-ID)
+
+### Identify Mode
+![Identify Mode demo](https://github.com/user-attachments/assets/PASTE-IDENTIFY-ID)
  
 ## Installation
 
