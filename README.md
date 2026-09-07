@@ -47,14 +47,15 @@
 ## Demo
 
 ### Ruler Mode
-![Ruler Mode demo](https://github.com/user-attachments/assets/PASTE-RULER-ID)
+[![Ruler Mode Demo](https://github.com/user-attachments/assets/96ae2684-4aba-4663-b759-e47336cca17f)](https://youtube.com/shorts/xpC5-fFwBuM)
 
 ### Flatten Mode
-![Flatten Mode demo](https://github.com/user-attachments/assets/PASTE-FLATTEN-ID)
+
+[![Flatten Mode Demo](https://github.com/user-attachments/assets/0b5657e1-e52c-4a0d-9f0b-9f2153fa8f93)](https://youtube.com/shorts/BfeSxQi_fo0)
 
 ### Identify Mode
-![Identify Mode demo](https://github.com/user-attachments/assets/PASTE-IDENTIFY-ID)
- 
+[![Identify Mode Demo](https://github.com/user-attachments/assets/205cdd90-3a0d-4c68-b878-4585d9ae29cd)](https://youtube.com/shorts/TXqokrcKDLo)
+
 ## Installation
 
 ### Requirements
