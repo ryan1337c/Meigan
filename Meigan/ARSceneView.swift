@@ -260,6 +260,14 @@ struct ARSceneView: UIViewRepresentable {
         /// Low-pass filtered surface normal — cuts twist/spin from noisy raycast normals (broken ring makes this visible).
         private var smoothNormal: SIMD3<Float>?
         private var lastUpdateTime: CFTimeInterval = 0
+        /// Previous frame's raw raycast target; drives the velocity-adaptive smoothing from
+        /// actual target motion (not target-vs-smoothed distance, which under-reports slow pans).
+        private var lastRawTargetPos: SIMD3<Float>?
+        /// Lightly filtered target speed (m/s) so single-frame raycast jitter doesn't spike the alpha.
+        private var smoothedTargetSpeed: Float = 0
+        /// Camera→target distance from the last real hit. During the miss-hold debounce window the
+        /// ring is re-projected along the current center ray at this depth so it stays under the dot.
+        private var lastReticleDepthMeters: Float?
 
         /// Debounce validity: hide after N consecutive bad frames; show after N consecutive good frames (when hidden).
         private var consecutiveMisses = 0
@@ -269,6 +277,9 @@ struct ARSceneView: UIViewRepresentable {
         private let showThreshold = 2
         private let normalSmoothAlpha: Float = 0.14
         private let minReticlePlacementDistanceMeters: Float = 0.15
+        /// Frame-to-frame raycast jump beyond this means the aim crossed onto a different
+        /// surface (or off an edge): snap the ring instead of blending through mid-air.
+        private let reticleSurfaceSnapDistanceMeters: Float = 0.1
 
         /// Avoid hiding reticle on single-frame tracking flicker.
         private var consecutiveBadTrackingFrames = 0
@@ -525,10 +536,16 @@ struct ARSceneView: UIViewRepresentable {
             smoothRotation = nil
             smoothNormal = nil
             lastUpdateTime = 0
+            lastRawTargetPos = nil
+            smoothedTargetSpeed = 0
+            lastReticleDepthMeters = nil
             consecutiveMisses = 0
             consecutiveHits = 0
             lastAutolockedPinWorld = nil
             latestPinAutolockWorld = nil
+            // Keep the SwiftUI dot in lockstep with the ring: whenever the ring is force-hidden,
+            // the dot (and the + button) must not claim a valid target.
+            DispatchQueue.main.async { self.hasValidTarget = false }
         }
 
         private func hideRing() {
@@ -536,20 +553,101 @@ struct ARSceneView: UIViewRepresentable {
             if self.draftSegmentStart != nil {
                 self.clearSingleMarkPreviewVisuals()
             }
-            DispatchQueue.main.async { self.hasValidTarget = false }
         }
 
-        /// `ARRaycastQuery.Target` has no `.mesh` — only plane types. Scene reconstruction in `makeWorldTrackingConfiguration()` still helps LiDAR sessions.
-        private func raycastReticle(from center: CGPoint, in arView: ARView) -> ARRaycastResult? {
-            if let q = arView.makeRaycastQuery(from: center, allowing: .existingPlaneGeometry, alignment: .any),
-               let h = arView.session.raycast(q).first {
-                return h
+        /// While the raycast is momentarily missing (debounce window), hold the reticle on the
+        /// current screen-center ray at the last known surface depth. This keeps the ring visually
+        /// under the dot instead of parking it at a stale world position while the camera moves.
+        private func heldReticleTarget(arView: ARView, screenCenter: CGPoint) -> SIMD3<Float>? {
+            guard let depth = lastReticleDepthMeters,
+                  let ray = arView.ray(through: screenCenter) else { return nil }
+            return ray.origin + simd_normalize(ray.direction) * depth
+        }
+
+        /// A surface under the crosshair: world position plus surface normal, tagged with where it came from.
+        struct ReticleSurfaceHit {
+            enum Source {
+                /// LiDAR scene-reconstruction mesh (RealityKit scene-understanding collision).
+                case sceneMesh
+                /// A plane ARKit has detected and is tracking (`ARPlaneAnchor` geometry).
+                case existingPlane
+                /// A plane ARKit estimates from nearby feature points (not yet a tracked anchor).
+                case estimatedPlane
             }
-            if let q = arView.makeRaycastQuery(from: center, allowing: .estimatedPlane, alignment: .any),
-               let h = arView.session.raycast(q).first {
-                return h
+            let position: SIMD3<Float>
+            let normal: SIMD3<Float>
+            let source: Source
+        }
+
+        /// When the LiDAR mesh and a plane agree to within this distance, prefer the plane: tracked plane
+        /// geometry is refined over time and gives a cleaner position/normal than the voxelised mesh.
+        private let planeOverMeshPreferenceMeters: Float = 0.02
+        /// Longest ray we care about; anything beyond is classified `.noSurface` anyway.
+        private let reticleRaycastMaxLengthMeters: Float = 5.0
+
+        /// Nearest-visible-surface raycast under the crosshair.
+        ///
+        /// Every available source is queried and the hit **closest to the camera** wins — that is, by
+        /// definition, the surface the user is actually looking at. The old "existing plane first,
+        /// estimated plane only as a fallback" ordering let a large, early-detected plane (the floor)
+        /// win even when a closer object sat in front of it: the ray passed straight through the
+        /// not-yet-detected top of a box and landed on the floor underneath, so points "phased
+        /// through" the object.
+        ///
+        /// Sources, all tried every frame:
+        /// - LiDAR scene mesh via `arView.scene.raycast(mask: .sceneUnderstanding)` — covers object
+        ///   tops/sides immediately, long before (or without) ARKit promoting them to planes. Requires
+        ///   `sceneUnderstanding.options` to include `.collision` (see `makeUIView`). No-op on non-LiDAR.
+        /// - `.existingPlaneGeometry` — tracked plane anchors, bounded by their detected extent.
+        /// - `.estimatedPlane` — feature-point estimate; often the first thing to catch a small surface.
+        private func raycastReticle(
+            from center: CGPoint,
+            cameraPosition camPos: SIMD3<Float>,
+            in arView: ARView
+        ) -> ReticleSurfaceHit? {
+            var candidates: [ReticleSurfaceHit] = []
+
+            if let ray = arView.ray(through: center) {
+                let dir = simd_normalize(ray.direction)
+                let meshHits = arView.scene.raycast(
+                    origin: ray.origin,
+                    direction: dir,
+                    length: reticleRaycastMaxLengthMeters,
+                    query: .nearest,
+                    mask: .sceneUnderstanding,
+                    relativeTo: nil
+                )
+                if let m = meshHits.first {
+                    let n = simd_length(m.normal) > 1e-6 ? simd_normalize(m.normal) : -dir
+                    candidates.append(ReticleSurfaceHit(position: m.position, normal: n, source: .sceneMesh))
+                }
             }
-            return nil
+
+            func appendPlaneHit(_ target: ARRaycastQuery.Target, as source: ReticleSurfaceHit.Source) {
+                guard let q = arView.makeRaycastQuery(from: center, allowing: target, alignment: .any),
+                      let h = arView.session.raycast(q).first
+                else { return }
+                let t = h.worldTransform
+                let p = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+                let n = simd_normalize(SIMD3<Float>(t.columns.1.x, t.columns.1.y, t.columns.1.z))
+                candidates.append(ReticleSurfaceHit(position: p, normal: n, source: source))
+            }
+            appendPlaneHit(.existingPlaneGeometry, as: .existingPlane)
+            appendPlaneHit(.estimatedPlane, as: .estimatedPlane)
+
+            guard let nearest = candidates.min(by: {
+                simd_distance($0.position, camPos) < simd_distance($1.position, camPos)
+            }) else { return nil }
+
+            // Mesh and plane agree on the same surface → take the plane's cleaner geometry.
+            if nearest.source == .sceneMesh {
+                let agreeingPlane = candidates.first { c in
+                    c.source != .sceneMesh
+                        && simd_distance(c.position, nearest.position) <= planeOverMeshPreferenceMeters
+                }
+                if let agreeingPlane { return agreeingPlane }
+            }
+            return nearest
         }
 
         /// Returns the candidate whose screen projection is nearest the crosshair, only if within snap radius.
@@ -907,8 +1005,14 @@ struct ARSceneView: UIViewRepresentable {
                     self.lineMidHoverDotEntity?.isEnabled = false
                 }
 
-                // Planes: existing geometry → estimated
-                let hit = self.raycastReticle(from: center, in: arView)
+                let camPos = SIMD3<Float>(
+                    currentFrame.camera.transform.columns.3.x,
+                    currentFrame.camera.transform.columns.3.y,
+                    currentFrame.camera.transform.columns.3.z
+                )
+
+                // Nearest visible surface across LiDAR mesh + existing planes + estimated planes.
+                let hit = self.raycastReticle(from: center, cameraPosition: camPos, in: arView)
 
                 func registerMiss() {
                     self.consecutiveHits = 0
@@ -917,12 +1021,6 @@ struct ARSceneView: UIViewRepresentable {
                         self.hideRing()
                     }
                 }
-
-                let camPos = SIMD3<Float>(
-                    currentFrame.camera.transform.columns.3.x,
-                    currentFrame.camera.transform.columns.3.y,
-                    currentFrame.camera.transform.columns.3.z
-                )
 
                 let pinCandidates = self.currentMode.pinCandidates()
                 let pinLockWorld = Self.linePinpointScreenAutolockWorld(
@@ -949,15 +1047,13 @@ struct ARSceneView: UIViewRepresentable {
                         aimClassification = .valid(targetPos: pin, useCameraFacingNormal: true)
                     }
                 } else if let h = hit {
-                    let hitTransform = h.worldTransform
-                    let hitPos = SIMD3<Float>(hitTransform.columns.3.x, hitTransform.columns.3.y, hitTransform.columns.3.z)
-                    let distance = simd_distance(hitPos, camPos)
+                    let distance = simd_distance(h.position, camPos)
                     if distance < self.minReticlePlacementDistanceMeters {
                         aimClassification = .tooClose
                     } else if distance > 3.0 {
                         aimClassification = .noSurface
                     } else {
-                        aimClassification = .valid(targetPos: hitPos, useCameraFacingNormal: false)
+                        aimClassification = .valid(targetPos: h.position, useCameraFacingNormal: false)
                     }
                 } else {
                     aimClassification = .noSurface
@@ -965,6 +1061,9 @@ struct ARSceneView: UIViewRepresentable {
 
                 let targetPos: SIMD3<Float>
                 let useCameraFacingNormal: Bool
+                /// True when this frame is a raycast miss inside the debounce window and the ring is
+                /// being held on the center ray at the last depth (cosmetic + placement coherence).
+                var isHeldMiss = false
                 switch aimClassification {
                 case .tooClose:
                     self.updatePlacementGuide(.tooClose)
@@ -979,33 +1078,54 @@ struct ARSceneView: UIViewRepresentable {
                     self.updatePinAutolockHaptics(pinWorld: nil)
                     self.latestPinAutolockWorld = nil
                     registerMiss()
-                    return
+                    // Inside the miss debounce window the ring is still shown. Rather than leaving it
+                    // parked at a stale world position (which drifts off the dot as the camera moves),
+                    // hold it on the current center ray at the last known depth. Once the threshold
+                    // trips, registerMiss() has hidden the ring and we fall out here.
+                    guard self.ringEntity?.isEnabled == true,
+                          let held = self.heldReticleTarget(arView: arView, screenCenter: center) else {
+                        return
+                    }
+                    targetPos = held
+                    useCameraFacingNormal = false
+                    isHeldMiss = true
                 case .valid(let classifiedPos, let classifiedUseCameraFacingNormal):
                     self.updatePlacementGuide(.none)
                     targetPos = classifiedPos
                     useCameraFacingNormal = classifiedUseCameraFacingNormal
                 }
 
-                self.updatePinAutolockHaptics(pinWorld: pinLockWorld)
-                self.latestPinAutolockWorld = pinLockWorld
+                if !isHeldMiss {
+                    self.updatePinAutolockHaptics(pinWorld: pinLockWorld)
+                    self.latestPinAutolockWorld = pinLockWorld
 
-                // Valid aim (surface raycast and/or line pinpoint autolock)
-                self.consecutiveMisses = 0
-                let ringWasVisible = self.ringEntity?.isEnabled == true
-                if !ringWasVisible {
-                    self.consecutiveHits += 1
-                    guard self.consecutiveHits >= self.showThreshold else { return }
+                    // Valid aim (surface raycast and/or line pinpoint autolock)
+                    self.consecutiveMisses = 0
+                    let ringWasVisible = self.ringEntity?.isEnabled == true
+                    if !ringWasVisible {
+                        self.consecutiveHits += 1
+                        guard self.consecutiveHits >= self.showThreshold else { return }
+                    }
+                    self.lastReticleDepthMeters = simd_distance(targetPos, camPos)
                 }
 
                 // Stable rotation: low-pass the normal before building basis (reduces visible spin on 3-arc ring).
-                let rawNormal: SIMD3<Float>
-                if useCameraFacingNormal {
+                var rawNormal: SIMD3<Float>
+                if isHeldMiss, let heldNormal = self.smoothNormal {
+                    // Keep the last surface orientation; don't tilt toward the camera for a few frames.
+                    rawNormal = heldNormal
+                } else if useCameraFacingNormal {
                     rawNormal = simd_normalize(camPos - targetPos)
                 } else if let h = hit {
-                    let hitTransform = h.worldTransform
-                    rawNormal = simd_normalize(SIMD3<Float>(hitTransform.columns.1.x, hitTransform.columns.1.y, hitTransform.columns.1.z))
+                    rawNormal = h.normal
                 } else {
                     rawNormal = simd_normalize(camPos - targetPos)
+                }
+                // The ring mesh is single-sided (+Y front). ARKit plane normals can point away from the
+                // viewer (vertical planes with flipped Y, ceilings/undersides), which would back-face
+                // cull the whole ring while the dot stays visible. Always face the camera hemisphere.
+                if simd_dot(rawNormal, camPos - targetPos) < 0 {
+                    rawNormal = -rawNormal
                 }
                 let normal: SIMD3<Float>
                 if let prevN = self.smoothNormal {
@@ -1033,7 +1153,10 @@ struct ARSceneView: UIViewRepresentable {
                 let tangentZ = simd_cross(tangentX, normal)
                 let targetRot = simd_quatf(simd_float3x3(columns: (tangentX, normal, tangentZ)))
 
-                // Velocity-adaptive delta-time smoothing
+                // Velocity-adaptive delta-time smoothing.
+                // Smoothing is cosmetic (ring visuals only). Placement, previews, and
+                // readouts use the raw raycast target so committed points land exactly
+                // on the detected surface instead of trailing the smoothed reticle.
                 let pos: SIMD3<Float>
                 let rot: simd_quatf
 
@@ -1042,23 +1165,37 @@ struct ARSceneView: UIViewRepresentable {
                     let clampedDt = min(max(dt, 0.001), 0.1)
 
                     let displacement = simd_distance(targetPos, prevPos)
-                    let speed = displacement / clampedDt
-                    let velocityFactor = min(speed / 0.5, 1.0)
 
-                    let adaptivePosAlpha: Float = 0.08 + velocityFactor * 0.42
-                    // Slower rotation blend at rest = less jitter; still responsive when moving fast.
-                    let adaptiveRotAlpha: Float = 0.035 + velocityFactor * 0.22
+                    // Speed of the *raw target* between frames. Using target-vs-smoothed distance here
+                    // (the old approach) under-reports slow continuous pans and keeps the alpha pinned
+                    // at its floor, so the ring trails ~12 frames behind the dot.
+                    let rawTargetStep = self.lastRawTargetPos.map { simd_distance(targetPos, $0) } ?? 0
+                    let instantSpeed = rawTargetStep / clampedDt
+                    self.smoothedTargetSpeed = simd_mix(self.smoothedTargetSpeed, instantSpeed, 0.35)
 
-                    let posT = 1.0 - pow(1.0 - adaptivePosAlpha, clampedDt * 60.0)
-                    let rotT = 1.0 - pow(1.0 - adaptiveRotAlpha, clampedDt * 60.0)
+                    if displacement > self.reticleSurfaceSnapDistanceMeters {
+                        pos = targetPos
+                        rot = targetRot
+                    } else {
+                        let speed = max(self.smoothedTargetSpeed, displacement / clampedDt)
+                        let velocityFactor = min(speed / 0.5, 1.0)
 
-                    pos = simd_mix(prevPos, targetPos, SIMD3<Float>(repeating: posT))
-                    rot = simd_slerp(prevRot, targetRot, rotT)
+                        let adaptivePosAlpha: Float = 0.08 + velocityFactor * 0.42
+                        // Slower rotation blend at rest = less jitter; still responsive when moving fast.
+                        let adaptiveRotAlpha: Float = 0.035 + velocityFactor * 0.22
+
+                        let posT = 1.0 - pow(1.0 - adaptivePosAlpha, clampedDt * 60.0)
+                        let rotT = 1.0 - pow(1.0 - adaptiveRotAlpha, clampedDt * 60.0)
+
+                        pos = simd_mix(prevPos, targetPos, SIMD3<Float>(repeating: posT))
+                        rot = simd_slerp(prevRot, targetRot, rotT)
+                    }
                 } else {
                     pos = targetPos
                     rot = targetRot
                 }
                 self.lastUpdateTime = now
+                self.lastRawTargetPos = targetPos
 
                 self.smoothPosition = pos
                 self.smoothRotation = rot
@@ -1066,10 +1203,10 @@ struct ARSceneView: UIViewRepresentable {
                 self.ringEntity?.position = pos
                 self.ringEntity?.orientation = rot
                 self.ringEntity?.isEnabled = true
-                self.latestReticleWorldPosition = pos
+                self.latestReticleWorldPosition = targetPos
 
                 self.currentMode.updateAfterReticle(
-                    reticleWorld: pos,
+                    reticleWorld: targetPos,
                     camWorld: camForLabel,
                     camUp: camUp
                 )
@@ -2284,6 +2421,11 @@ struct ARSceneView: UIViewRepresentable {
 
             var material = UnlitMaterial()
             material.color = .init(tint: .white.withAlphaComponent(0.9))
+            // Belt-and-braces with the camera-facing normal flip in the update loop: even if the
+            // ring ends up viewed from its -Y side (e.g. mid-blend of `smoothNormal`), never cull it.
+            if #available(iOS 18.0, *) {
+                material.faceCulling = .none
+            }
 
             let entity = ModelEntity(mesh: mesh, materials: [material])
             entity.isEnabled = false
@@ -2339,6 +2481,16 @@ struct ARSceneView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
+        // We run our own ARWorldTrackingConfiguration (plane detection + LiDAR mesh). With the
+        // default `true`, ARView can re-run its own default configuration when it enters the window,
+        // silently replacing ours and changing what `raycastReticle` can hit.
+        arView.automaticallyConfigureSession = false
+        // Let RealityKit build collision shapes from the LiDAR scene mesh so `raycastReticle` can hit
+        // object surfaces (box tops, etc.) directly instead of only ARKit-detected planes. Harmless on
+        // devices without scene reconstruction (no mesh anchors → nothing to collide with).
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+            arView.environment.sceneUnderstanding.options.insert(.collision)
+        }
 
         context.coordinator.arView = arView
         context.coordinator.appliedTrackingGuideShowThreshold = trackingGuideShowThreshold

@@ -7,24 +7,35 @@ import UIKit
 /// Ruler mode: connected polyline segments. Each tap commits the next vertex
 /// (extending from the last endpoint or from an autolocked pin), and the reticle
 /// can snap to any pinpoint (endpoints **and** midpoints) of existing edges.
+///
+/// Autolock is universal: it applies both when choosing where a new segment *starts*
+/// (branching off an existing line) and where it *ends*, so two otherwise independent
+/// lines can be joined at a shared pinpoint. A locked endpoint is committed at the pin's
+/// exact world position, so the joined lines share one vertex rather than two
+/// near-coincident ones.
 final class RulerMeasurementMode: MeasurementModeBehavior {
     weak var host: ARSceneView.Coordinator?
+
+    /// Pins this close to the in-flight draft start are excluded while drafting, so the free end
+    /// can't lock back onto its own origin (which would only ever produce a zero-length segment).
+    private static let draftStartExclusionMeters: Float = 0.005
 
     init(host: ARSceneView.Coordinator) {
         self.host = host
     }
 
     func pinCandidates() -> [SIMD3<Float>] {
-        guard let host else { return [] }
-        if host.draftSegmentStart == nil, !host.committedSegments.isEmpty {
-            return MeasurementSegment.allPinpointWorldPositions(for: host.committedSegments)
-        }
-        return []
+        guard let host, !host.committedSegments.isEmpty else { return [] }
+        let pins = MeasurementSegment.allPinpointWorldPositions(for: host.committedSegments)
+        guard let start = host.draftSegmentStart else { return pins }
+        return pins.filter { simd_distance($0, start) > Self.draftStartExclusionMeters }
     }
 
     func resetAutolockBookkeepingIfNeeded() {
         guard let host else { return }
-        if host.committedSegments.isEmpty || host.draftSegmentStart != nil {
+        // Only clear when there is nothing to lock onto. Clearing during a draft (the old rule)
+        // would re-trigger the lock haptic every frame now that the free end can autolock too.
+        if host.committedSegments.isEmpty {
             host.lastAutolockedPinWorld = nil
         }
     }
@@ -57,8 +68,11 @@ final class RulerMeasurementMode: MeasurementModeBehavior {
 
         if let start = host.draftSegmentStart {
             host.draftSegmentStart = nil
-            if simd_distance(start, p) > 1e-5 {
-                host.committedSegments.append(MeasurementSegment(start: start, end: p))
+            // If the free end is autolocked, join at the pin's exact position so the two lines
+            // share a single vertex (the reticle target already equals the pin, but be explicit).
+            let end = host.latestPinAutolockWorld ?? p
+            if simd_distance(start, end) > 1e-5 {
+                host.committedSegments.append(MeasurementSegment(start: start, end: end))
             }
         } else {
             if !host.committedSegments.isEmpty {
