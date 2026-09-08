@@ -47,7 +47,7 @@
 ## Demo
 
 ### Ruler Mode
-[![Ruler Mode Demo](https://github.com/user-attachments/assets/96ae2684-4aba-4663-b759-e47336cca17f)](https://youtube.com/shorts/xpC5-fFwBuM)
+[![Ruler Mode Demo](https://github.com/user-attachments/assets/380f6c7a-2cfb-47d9-a2e9-d7f9b529eb21)](https://youtube.com/shorts/7p2S7bmIc_E)
 
 ### Flatten Mode
 
