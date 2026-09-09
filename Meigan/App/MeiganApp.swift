@@ -37,7 +37,6 @@ struct MeiganApp: App {
                     Task {
                         await subscriptions.loadProductsIfNeeded()
                     }
-
                 }
                 .onChange(of: scenePhase) { phase in
                     guard phase == .active else { return }

@@ -3,33 +3,28 @@ import Supabase
 import StoreKit
 
 enum SubscriptionValidationService {
-    
+
     // Validates a transaction on the server
     static func validateOnServer(transaction: VerificationResult<Transaction>) async throws {
         let jws = transaction.jwsRepresentation
 
         struct Body: Encodable { let signedTransaction: String }
-        
+
         // Define structs for both success and error scenarios
-        struct SuccessResponse: Decodable { 
-            let tier: String 
-            let expiresAt: String? // Added since your backend returns this!
+        struct SuccessResponse: Decodable {
+            let tier: String
+            let expiresAt: String?
         }
-        struct ErrorResponse: Decodable { 
-            let error: String 
+        struct ErrorResponse: Decodable {
+            let error: String
         }
 
         do {
-            // Attempt the invocation
-            let response: SuccessResponse = try await supabase.functions.invoke(
+            let _: SuccessResponse = try await supabase.functions.invoke(
                 "validate-subscription",
                 options: FunctionInvokeOptions(body: Body(signedTransaction: jws))
             )
-            
-            print("Successfully validated! Tier: \(response.tier)")
-         
-            
-        } catch { 
+        } catch {
             if case FunctionsError.httpError(let code, let data) = error {
                 if let serverError = try? JSONDecoder().decode(ErrorResponse.self, from: data) {
                     print("Server rejected transaction (\(code)): \(serverError.error)")
@@ -56,17 +51,15 @@ enum SubscriptionValidationService {
               let tier = SubscriptionTier(rawValue: raw) else { return .free }
 
         return tier
-            
     }
 
     enum CustomSubscriptionError: Error, LocalizedError {
         case overlap(message: String)
-        
+
         var errorDescription: String? {
             switch self {
             case .overlap(let message): return message
             }
         }
     }
-
 }

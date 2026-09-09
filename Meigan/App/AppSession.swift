@@ -80,8 +80,8 @@ final class AppSession: ObservableObject {
         }
     }
 
-    func deleteAccount() async throws{
-        try await supabase.functions.invoke("delete-account");
+    func deleteAccount() async throws {
+        try await supabase.functions.invoke("delete-account")
         logOut()
     }
 
@@ -117,8 +117,7 @@ final class AppSession: ObservableObject {
                         if synced {
                             isAuthenticated = true
                         }
-                    }
-                    else {
+                    } else {
                         isAuthenticated = true
                     }
                 case .signedOut:
@@ -160,8 +159,8 @@ final class AppSession: ObservableObject {
         guard pendingAuthenticatedSync,
               settingsManager != nil,
               subscriptionManager != nil else { return }
-        Task { 
-            let synced = await syncManagers() 
+        Task {
+            let synced = await syncManagers()
             if synced {
                 isAuthenticated = true
             }

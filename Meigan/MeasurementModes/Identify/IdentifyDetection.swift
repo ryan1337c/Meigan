@@ -9,7 +9,7 @@ enum IdentifyPipelineDebug {
 }
 
 struct IdentifyTrack {
-    let id: UUID 
+    let id: UUID
     var label: String
     var confidence: Float
     var viewRect: CGRect
@@ -26,7 +26,7 @@ struct IdentifyDetection: Identifiable, Equatable {
     let label: String
     let confidence: Float
     let viewRect: CGRect
-    let centralityNormalized: CGFloat // Distance from center of camerframe to bounding box center
+    let centralityNormalized: CGFloat // Distance from center of camera frame to bounding box center
     let proximityNormalized: CGFloat // Distance from camera frame to target
     let score: CGFloat
 }
@@ -68,4 +68,3 @@ enum IdentifyScoring {
         return confidenceTerm + centralityTerm + proximityTerm
     }
 }
-

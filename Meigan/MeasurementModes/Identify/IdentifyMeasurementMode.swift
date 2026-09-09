@@ -72,7 +72,7 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
         let pixelBuffer = frame.capturedImage
         pipelineDebugFrameID += 1
         let debugFrameID = pipelineDebugFrameID
-        
+
         let generation = detectionGeneration
         let camWorldForScoring = camWorld
         detector.detect(
@@ -278,7 +278,7 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
 
     private func topDetections(_ detections: [IdentifyDetection], limit: Int) -> [IdentifyDetection] {
         return detections
-            .sorted{
+            .sorted {
                 if $0.score != $1.score { return $0.score > $1.score }
                 if $0.confidence != $1.confidence { return $0.confidence > $1.confidence }
                 return $0.id.uuidString < $1.id.uuidString // stable tie breaking
@@ -301,7 +301,7 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
         detectionGeneration += 1
     }
 
-    // MARK: - Mapping (step 5)
+    // MARK: - Mapping
 
     /// `boxNormalized` is already in upright (oriented) image space, which shares the
     /// viewport's orientation, so there is no rotation to apply — only the aspect-fill

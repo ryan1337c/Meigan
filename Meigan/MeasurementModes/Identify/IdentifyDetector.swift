@@ -84,22 +84,21 @@ final class IdentifyDetector {
             // Keep the full camera image in model input; boxes are un-letterboxed in `parse`.
             req.imageCropAndScaleOption = .scaleFit
             return req
-        }
-        catch {
+        } catch {
             assertionFailure("Failed to load yolo26n: \(error)")
             return nil
         }
     }()
 
-    // Drops current frame while a previous frame is being processed so the 60Hz scene loop 
+    // Drops current frame while a previous frame is being processed so the 60Hz scene loop
     // never blocks.
     func detect(pixelBuffer: CVPixelBuffer,
                 orientation: CGImagePropertyOrientation,
                 debugFrameID: Int,
-                completion: @escaping([RawDetection]) -> Void) {
-        guard !isBusy, let request else { return}
+                completion: @escaping ([RawDetection]) -> Void) {
+        guard !isBusy, let request else { return }
         isBusy = true
-        queue.async { [weak self] in 
+        queue.async { [weak self] in
             guard let self else { return }
             defer { self.isBusy = false }
             let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
@@ -129,7 +128,7 @@ final class IdentifyDetector {
         guard let obs = results?.first as? VNCoreMLFeatureValueObservation,
         let array = obs.featureValue.multiArrayValue else { return [] }
 
-        // Expecting shape [1, N, 6]: x1, y1, x2, y2, conf,cls (coords in 640 space)
+        // Expecting shape [1, N, 6]: x1, y1, x2, y2, conf, cls (coords in 640 space)
         let shape = array.shape.map { $0.intValue }
         guard shape.count == 3, shape[2] == 6 else { return [] }
         let n = shape[1]

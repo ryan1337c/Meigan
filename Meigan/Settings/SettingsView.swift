@@ -13,7 +13,6 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-
             Section {
                 Picker("Units", selection: $settings.measurementUnit) {
                     ForEach(MeasurementUnit.allCases, id: \.rawValue) { unit in

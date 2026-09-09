@@ -1,0 +1,82 @@
+---
+description: Clean code structure and enforce 300 to 500 line limits per file
+globs: "*.*"
+alwaysApply: false
+---
+
+# Vibe clean
+
+## Trigger
+
+The user runs `/vibe-clean` or asks to clean, tidy, or refactor dirty code (current file, selection, or specified scope).
+
+## Principle
+
+**Stack-agnostic:** Always analyze the code first (language, file type, repo conventions), then apply cleanups appropriate to that context. Do not assume a specific tech stack.
+
+## Workflow
+
+### 1. Analyze first
+
+- Detect **language** and **file type** from extension and syntax (e.g. JS/TS, Python, Go, Ruby, Java, C#, etc.).
+- Infer **project conventions** from the file and repo: indentation (spaces/tabs, 2 vs 4), quotes, semicolons, line length, naming style (camelCase, snake_case, etc.), import/export style.
+- Determine **scope**: current file, selection, or user-specified files. Default to current file or selection.
+
+### 2. Format
+
+- Normalize **indentation** to match project (spaces or tabs, width).
+- Normalize **quotes** and **semicolons** to project style.
+- Remove **trailing spaces** and **extra blank lines**; respect reasonable **line length** if the project shows a pattern.
+- Apply formatting consistently across the scope.
+
+### 3. Noise
+
+- Identify **stray debug code**: `console.*`, `debugger`, temporary `print`/logging not meant for production. Remove or gate behind env/flag; prefer removal when clearly debug-only.
+- Flag **commented-out code blocks**; suggest removal (or move to version control/docs).
+- Surface **TODOs/FIXMEs** that look like pre-ship cleanup; suggest resolving or tracking in issues.
+
+### 4. Dead code
+
+- **Unused imports** — remove.
+- **Unused variables** and **unreachable code** in scope — remove or suggest removal.
+- **Unused functions** (e.g. local helpers never called) — suggest removal or document why kept.
+
+Adapt detection to the language (e.g. import syntax in Python vs JS/TS vs Go).
+
+### 5. Naming
+
+- Flag **unclear or generic names** (e.g. `x`, `temp`, `data2`, `foo`) and suggest **clearer, descriptive names**.
+- Apply renames when safe (same file or clearly scoped); ensure references are updated.
+
+### 6. Structure
+
+- Identify **very long functions** or **large files**; suggest splitting or extracting (e.g. extract helper, split into smaller functions).
+- Identify **obvious duplication** (same logic in multiple places); suggest extracting to a shared function or constant and apply when straightforward.
+- Keep changes **small and safe**; avoid large architectural refactors.
+
+### 7. Consistency
+
+- Ensure all applied cleanups **match inferred project conventions** (same quotes, same indent, same naming style).
+- When in doubt, preserve existing style rather than introducing a new one.
+
+### 8. Vibe report and apply
+
+- Produce a short **vibe report**: what was analyzed (language, scope), what was changed (format, noise, dead code, naming, structure), and a one-line summary (e.g. "Cleaned 5 format issues, removed 2 unused imports, renamed 3 variables, extracted 1 helper.").
+- **Apply** the refactors (edit the file(s)); do not only suggest unless the user asked for report-only (then use vibe-check instead).
+- Keep the report **friendly and concise** (vibe coder tone).
+
+## Guardrails
+
+- Do not introduce logic changes or bug "fixes"; only clean and refactor structure/format/naming/dead code.
+- Do not assume a single tech stack; infer from the code every time.
+- If the scope is large (many files), process in a sensible order or ask the user to narrow scope.
+- Preserve behavior; refactors must be semantics-preserving.
+
+## Output
+
+- Edited file(s) with cleanups applied.
+- Short vibe report (scope, language, list of changes, one-line summary).
+
+## Structure Guidelines
+- Target file size: **300 to 500 lines of code**.
+- If any file exceeds 500 lines, automatically extract helper functions, custom hooks, or sub-components into separate adjacent files to keep file length within range.

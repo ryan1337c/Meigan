@@ -18,12 +18,13 @@ enum StoreKitPurchaseError: LocalizedError {
         }
     }
 }
+
 @MainActor
 protocol SubscriptionPurchasing: AnyObject {
     var proProduct: Product? { get }
     var proPriceLabel: String? { get }
 
-    func loadProducts() async 
+    func loadProducts() async
     func purchasePro() async throws -> VerificationResult<Transaction>?
     func restorePurchases() async throws -> Bool
     func hasActiveProEntitlement() async throws -> Bool
@@ -33,7 +34,7 @@ protocol SubscriptionPurchasing: AnyObject {
     func currentProEntitlement() async -> VerificationResult<Transaction>?
 }
 
-@MainActor 
+@MainActor
 final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
 
     @Published private(set) var proProduct: Product?
@@ -49,7 +50,7 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
     var onEntitlementChanged: ((VerificationResult<Transaction>) async -> Void)?
 
     // Listens for StoreKit transactions and updates the entitlement
-    // Accounts for for purchases made outside the app
+    // Accounts for purchases made outside the app
     private var transactionListenerTask: Task<Void, Never>?
 
     deinit {
@@ -62,10 +63,6 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
         do {
             let products = try await Product.products(for: MeiganProducts.all)
             proProduct = products.first { $0.id == MeiganProducts.proMonthly }
-
-            print("StoreKit loaded:", products.map(\.id))
-            print("Matched proProduct:", proProduct?.id ?? "nil")
-
         } catch {
             print("Failed to load products: \(error)")
             proProduct = nil
@@ -74,7 +71,7 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
 
     // MARK: - Purchase
 
-    func purchasePro() async throws -> VerificationResult<Transaction>? {    
+    func purchasePro() async throws -> VerificationResult<Transaction>? {
         if proProduct == nil {
             await loadProducts()
         }
@@ -86,26 +83,25 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
         let result = try await product.purchase()
 
         switch result {
-            case .success(let verification):
-                let transaction = try checkVerified(verification)
+        case .success(let verification):
+            let transaction = try checkVerified(verification)
 
-                 print("Purchase expiration:", transaction.expirationDate as Any)
-                 
-                // Strict validation: 409 / overlap errors surface to the paywall.
-                // On failure the transaction stays unfinished so StoreKit retries.
-                try await SubscriptionValidationService.validateOnServer(transaction: verification)
-                await transaction.finish()
-                return verification
+            // Strict validation: 409 / overlap errors surface to the paywall.
+            // On failure the transaction stays unfinished so StoreKit retries.
+            try await SubscriptionValidationService.validateOnServer(transaction: verification)
+            await transaction.finish()
+            return verification
 
-            case .userCancelled, .pending:
-                return nil
-            
-            @unknown default:
-                return nil
+        case .userCancelled, .pending:
+            return nil
+
+        @unknown default:
+            return nil
         }
     }
 
     // MARK: - Restore
+
     func restorePurchases() async throws -> Bool {
         try await AppStore.sync()
 
@@ -114,13 +110,12 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
         // Keep strict validation so 409 / overlap still surfaces on Restore tap
         try await SubscriptionValidationService.validateOnServer(transaction: result)
         return true
-
-
     }
 
     // MARK: - Entitlements
+
     func hasActiveProEntitlement() async throws -> Bool {
-        // Apple id bounded entitlement 
+        // Apple ID bounded entitlement
         let tier = try await SubscriptionValidationService.syncTierFromServer()
         return tier == .pro
     }
@@ -130,7 +125,7 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
             guard case .verified(let transaction) = result else { continue }
             guard transaction.productID == MeiganProducts.proMonthly else { continue }
             guard isProEntitlementActive(transaction) else { continue }
-            
+
             return result
         }
         return nil
@@ -140,7 +135,7 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
     /// `nil` when there is no active Pro subscription (or it never expires).
     func currentProExpirationDate() async -> Date? {
         guard let result = await currentProEntitlement(),
-            case .verified(let transaction) = result else { return nil }
+              case .verified(let transaction) = result else { return nil }
         return transaction.expirationDate
     }
 
@@ -194,12 +189,12 @@ final class StoreKitPurchaseService: SubscriptionPurchasing, ObservableObject {
 
     private func checkVerified<T>(_ result: VerificationResult<T>) throws -> T {
         switch result {
-            case .unverified:
-                throw StoreKitPurchaseError.unverifiedTransaction
-            case .verified(let transaction):
-                // Sends back either of the 3 cases: 
-                // 1. User buys subscription 2. Check auto-renew status 3. Verifying app download
-                return transaction 
+        case .unverified:
+            throw StoreKitPurchaseError.unverifiedTransaction
+        case .verified(let transaction):
+            // Sends back either of the 3 cases:
+            // 1. User buys subscription 2. Check auto-renew status 3. Verifying app download
+            return transaction
         }
     }
 }
