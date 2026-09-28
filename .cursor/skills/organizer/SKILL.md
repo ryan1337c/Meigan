@@ -1,7 +1,7 @@
 ---
+name: organizer
 description: Clean code structure and enforce 300 to 500 line limits per file
-globs: "*.*"
-alwaysApply: false
+disable-model-invocation: true
 ---
 
 # Vibe clean
