@@ -16,6 +16,11 @@ struct IdentifyTrack {
     /// Consecutive inference frames this track went unmatched. Tracks "coast" at their
     /// last known rect while this is below the grace threshold, then are removed.
     var missFrames: Int = 0
+    /// Total inference frames this track was matched (including the one that created it).
+    var hitCount: Int = 1
+    /// Decayed, accumulated confidence per label; the displayed `label` only changes when
+    /// another label clearly overtakes it.
+    var labelScores: [String: Float] = [:]
     var centralityNormalized: CGFloat = 0
     var proximityNormalized: CGFloat = 0
     var score: CGFloat = 0

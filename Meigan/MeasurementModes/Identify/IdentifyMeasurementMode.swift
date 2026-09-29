@@ -14,29 +14,24 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
     private let minInterval: TimeInterval = 0.1   // ~10 Hz
     private var pipelineDebugFrameID = 0
 
-    // Grace period to cache the detection results to prevent flickering when the detection results are not available
-    private var tracks: [IdentifyTrack] = []
-    private let matchIoUThreshold: CGFloat = 0.3
-    /// Looser IoU used when matching a coasting track (one that missed recent frames),
-    /// so a re-detected object re-attaches to its existing track instead of spawning a new one.
-    private let coastingMatchIoUThreshold: CGFloat = 0.1
-    /// A coasting track and a fresh detection are treated as the same object when their
-    /// centers are within this fraction of the larger box dimension (used to suppress duplicates).
-    private let coastingCenterDistanceFactor: CGFloat = 0.75
-    /// Number of consecutive missed inference frames a track survives before removal
-    /// (~0.3 s at the ~10 Hz detection cadence).
-    private let maxMissFrames = 3
-    /// A detection is dropped unless at least this fraction of its box area falls inside the
-    /// drawable region (viewport minus safe zones, and excluding any off-screen cropped part).
-    private let minVisibleFractionInView: CGFloat = 0.5
+    private let tracker = IdentifyTracker()
+    /// Whether the last published list was non-empty; if the overlay is then cleared externally
+    /// (e.g. Clear button), tracks are reset. Tentative tracks alone never count as published.
+    private var hasPublishedDetections = false
     /// Extra inset (points) added to the system safe-area insets when defining the drawable
     /// region (status bar / notch / home-indicator chrome).
     private let safeZoneExtraInset: CGFloat = 0
     private var detectionGeneration = 0
 
+    /// Candidates fed to the tracker per frame; larger than the display limit so lower-ranked
+    /// objects can still sustain their tracks.
+    private let maxTrackedDetections = 15
     private let maxDisplayedDetections = 10
 
-    init(host: ARSceneView.Coordinator) { self.host = host }
+    init(host: ARSceneView.Coordinator) {
+        self.host = host
+        detector.prepare()
+    }
 
     func pinCandidates() -> [SIMD3<Float>] { [] }
     func resetAutolockBookkeepingIfNeeded() {}
@@ -55,8 +50,8 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
         guard let host, let arView = host.arView,
               let frame = arView.session.currentFrame else { return }
 
-        // Reset tracks if the previous frame had detections but the current frame does not
-        if !tracks.isEmpty, host.identifyDetections.isEmpty {
+        // Reset tracks if detections were published but have since been cleared elsewhere
+        if hasPublishedDetections, host.identifyDetections.isEmpty {
             resetTracks()
         }
 
@@ -99,109 +94,24 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
                     extraInset: self.safeZoneExtraInset
                 )
 
+                // Dedupe before scoring so suppressed boxes don't cost a raycast.
                 let scored = self.applyScores(
-                    to: mapped,
+                    to: self.tracker.suppressOverlaps(mapped),
                     drawableRect: drawableRect,
                     camWorld: camWorldForScoring,
                     arView: arView
                 )
 
-                let topScored = self.topDetections(scored, limit: self.maxDisplayedDetections)
+                let topScored = self.topDetections(scored, limit: self.maxTrackedDetections)
 
                 let displayed = self.topDetections(
-                    self.updateTracks(with: topScored),
+                    self.tracker.update(with: topScored),
                     limit: self.maxDisplayedDetections
                 )
                 host.identifyDetections = displayed
+                self.hasPublishedDetections = !displayed.isEmpty
             }
         }
-    }
-
-    private func updateTracks(with detections: [IdentifyDetection]) -> [IdentifyDetection] {
-        var unmatchedDetectionIndices = Set(detections.indices)
-        var updatedTracks: [IdentifyTrack] = []
-        // Tracks kept this frame without a match (coasting). Used to suppress duplicate
-        // boxes when an unmatched detection is plausibly one of these same objects.
-        var coastingTracks: [IdentifyTrack] = []
-
-        // 1) Match existing tracks to detections (prefer highest IoU). Coasting tracks
-        //    use a looser threshold so a re-detected object re-attaches to its track.
-        for var track in tracks {
-            let threshold = track.missFrames > 0 ? coastingMatchIoUThreshold : matchIoUThreshold
-            var bestIdx: Int?
-            var bestIoU: CGFloat = threshold
-
-            for idx in unmatchedDetectionIndices {
-                let det = detections[idx]
-                guard det.label == track.label else { continue }
-                let overlap = iou(track.viewRect, det.viewRect)
-                if overlap > bestIoU {
-                    bestIoU = overlap
-                    bestIdx = idx
-                }
-            }
-
-            if let idx = bestIdx {
-                let det = detections[idx]
-                track.label = det.label
-                track.confidence = det.confidence
-                track.viewRect = det.viewRect
-                track.missFrames = 0
-                track.centralityNormalized = det.centralityNormalized
-                track.proximityNormalized = det.proximityNormalized
-                track.score = det.score
-                updatedTracks.append(track)
-                unmatchedDetectionIndices.remove(idx)
-            } else {
-                // 2) Unmatched track → coast at its last rect. Drop once it exceeds the grace period.
-                track.missFrames += 1
-                if track.missFrames <= maxMissFrames {
-                    updatedTracks.append(track)
-                    coastingTracks.append(track)
-                }
-            }
-        }
-
-        // 3) Unmatched detections → new tracks, unless a coasting track of the same label
-        //    could plausibly be the same object (prevents a duplicate box appearing next to
-        //    the coasting one when matching narrowly failed in step 1).
-        for idx in unmatchedDetectionIndices {
-            let det = detections[idx]
-            let plausiblyExisting = coastingTracks.contains { track in
-                track.label == det.label && couldBeSameObject(track.viewRect, det.viewRect)
-            }
-            guard !plausiblyExisting else { continue }
-            updatedTracks.append(IdentifyTrack(
-                id: UUID(),
-                label: det.label,
-                confidence: det.confidence,
-                viewRect: det.viewRect,
-                missFrames: 0
-            ))
-        }
-
-        tracks = updatedTracks
-
-        return tracks.map {
-            IdentifyDetection(id: $0.id, label: $0.label,
-                            confidence: $0.confidence, viewRect: $0.viewRect,
-                            centralityNormalized: $0.centralityNormalized,
-                            proximityNormalized: $0.proximityNormalized,
-                            score: $0.score)
-        }
-    }
-
-    /// Looser-than-IoU sameness test used only to suppress duplicate new tracks against a
-    /// coasting track: any overlap, or centers within `coastingCenterDistanceFactor` of the
-    /// larger box dimension, counts as "could be the same object".
-    private func couldBeSameObject(_ a: CGRect, _ b: CGRect) -> Bool {
-        if iou(a, b) > 0 { return true }
-        let dx = a.midX - b.midX
-        let dy = a.midY - b.midY
-        let distance = (dx * dx + dy * dy).squareRoot()
-        let reference = max(a.width, a.height, b.width, b.height)
-        guard reference > 0 else { return false }
-        return distance < reference * coastingCenterDistanceFactor
     }
 
     // Drawable region = viewport minus the system safe-area insets (status bar / notch /
@@ -287,17 +197,9 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
             .map { $0 }
     }
 
-    private func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
-        let intersection = a.intersection(b)
-        guard !intersection.isNull else { return 0 }
-        let interArea = intersection.width * intersection.height
-        let unionArea = a.width * a.height + b.width * b.height - interArea
-        guard unionArea > 0 else { return 0 }
-        return interArea / unionArea
-    }
-
     func resetTracks() {
-        tracks = []
+        tracker.reset()
+        hasPublishedDetections = false
         detectionGeneration += 1
     }
 
@@ -352,12 +254,9 @@ final class IdentifyMeasurementMode: MeasurementModeBehavior {
                 height: box.height * displayedHeight
             )
 
-            // Drop the detection unless at least `minVisibleFractionInView` of the box lies in
-            // the drawable region (covers both safe-zone chrome and off-screen cropped edges).
-            let totalArea = viewRect.width * viewRect.height
-            let visible = viewRect.intersection(drawableRect)
-            let visibleArea = visible.isNull ? 0 : visible.width * visible.height
-            guard totalArea > 0, visibleArea / totalArea >= minVisibleFractionInView else { return nil }
+            // Drop any box that isn't entirely inside the drawable region: a partly off-screen or
+            // chrome-covered box means the object isn't fully in view.
+            guard !viewRect.isEmpty, drawableRect.contains(viewRect) else { return nil }
 
             #if DEBUG
             if idx == debugIndex {

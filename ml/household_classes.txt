@@ -1,0 +1,121 @@
+# Text prompts for Identify mode, one per line; line order becomes the model's class index order.
+# Near-synonyms (couch/sofa, cup/mug) compete for the same box, so keep one wording per object.
+# Re-run ml/export_yoloe26n.py after editing.
+
+# Furniture
+chair
+office chair
+stool
+sofa
+armchair
+bed
+crib
+dining table
+coffee table
+desk
+nightstand
+dresser
+bookshelf
+cabinet
+wardrobe
+tv stand
+bench
+ottoman
+
+# Appliances
+refrigerator
+microwave
+oven
+stove
+dishwasher
+washing machine
+clothes dryer
+toaster
+kettle
+coffee maker
+blender
+air fryer
+rice cooker
+vacuum cleaner
+electric fan
+space heater
+
+# Electronics
+television
+laptop
+computer monitor
+keyboard
+computer mouse
+cell phone
+tablet
+speaker
+game controller
+remote control
+wifi router
+printer
+
+# Kitchen
+mug
+wine glass
+drinking glass
+bottle
+jar
+plate
+bowl
+cooking pot
+frying pan
+cutting board
+knife
+fork
+spoon
+dish rack
+tissue box
+trash can
+
+# Bathroom
+toilet
+sink
+bathtub
+shower
+towel
+toothbrush
+soap dispenser
+toilet paper
+hair dryer
+mirror
+
+# Decor and lighting
+lamp
+ceiling light
+clock
+picture frame
+vase
+potted plant
+candle
+rug
+curtain
+pillow
+
+# Storage and bags
+box
+basket
+backpack
+handbag
+suitcase
+laundry basket
+ironing board
+coat rack
+hanger
+umbrella
+
+# Fixtures
+door
+window
+light switch
+power outlet
+
+# Miscellaneous
+book
+scissors
+shoe
+blanket

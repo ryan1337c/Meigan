@@ -30,7 +30,7 @@
   - Within the flattened image, auto detect shapes and display their corresponding width, height, and perimenter. 
 * Identify Mode (Pro)
   - Detect and label common objects in real time using an on-device Core ML model.
-  - Powered by COCO 80 classification dataset, which was trained on yolo26n model. 
+  - Powered by the open-vocabulary YOLOE-26n model, prompted with 100 common household items. 
 * Smart Placement Guidance
   - Receive visual guidance for low light, excessive movement, nearby surfaces, and AR tracking conditions.
 * Save and Share

@@ -1,0 +1,4 @@
+ultralytics==8.4.165
+coremltools==9.0
+numpy==2.3.5
+clip @ git+https://github.com/ultralytics/CLIP.git
