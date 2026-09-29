@@ -41,8 +41,6 @@
 			membershipExceptions = (
 				Info.plist,
 				Models/yolo26n.mlpackage,
-				Models/yoloe26n_pf.mlpackage,
-				Models/yoloe26n_pf_names.json,
 			);
 			target = D3D997D92F479DBA00308C55 /* Meigan */;
 		};
