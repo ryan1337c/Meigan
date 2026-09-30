@@ -54,7 +54,7 @@
 [![Flatten Mode Demo](https://github.com/user-attachments/assets/0b5657e1-e52c-4a0d-9f0b-9f2153fa8f93)](https://youtube.com/shorts/BfeSxQi_fo0)
 
 ### Identify Mode
-[![Identify Mode Demo](https://github.com/user-attachments/assets/205cdd90-3a0d-4c68-b878-4585d9ae29cd)](https://youtube.com/shorts/BnSdTqSD9ho)
+[![Identify Mode Demo](https://github.com/user-attachments/assets/5c02c464-657d-4c9b-a518-bc2906566217)](https://youtube.com/shorts/BnSdTqSD9ho)
 
 ## Installation
 
