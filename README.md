@@ -51,7 +51,7 @@
 
 ### Flatten Mode
 
-[![Flatten Mode Demo](https://github.com/user-attachments/assets/0b5657e1-e52c-4a0d-9f0b-9f2153fa8f93)](https://youtube.com/shorts/BfeSxQi_fo0)
+[![Flatten Mode Demo](https://github.com/user-attachments/assets/9db01bed-f5cb-403c-902e-63663847da51)](https://youtube.com/shorts/e9IvzDRPhPk)
 
 ### Identify Mode
 [![Identify Mode Demo](https://github.com/user-attachments/assets/5c02c464-657d-4c9b-a518-bc2906566217)](https://youtube.com/shorts/BnSdTqSD9ho)
