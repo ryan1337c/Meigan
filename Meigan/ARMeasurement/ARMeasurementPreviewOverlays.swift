@@ -97,7 +97,7 @@ struct ScreenshotPreviewOverlay: View {
     }
 }
 
-/// Sheet showing the grayscale bitmap passed to `VNDetectContoursRequest`.
+/// Sheet showing Flatten's detection debug image: subject masks, or the fallback contour bitmap.
 struct FlattenDetectionPreviewSheet: View {
     let image: UIImage
     let onSave: (@escaping (Bool) -> Void) -> Void
@@ -110,7 +110,7 @@ struct FlattenDetectionPreviewSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("This is the mono + contrast + median image Vision uses for contour detection. If the object boundary is faint or broken here, tuning contrast alone won’t fix bounding boxes.")
+                    Text("Black is what Vision found and what gets outlined. An object that is white here was never found. On devices without subject masks, this shows the grayscale contour-detection image instead.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
 

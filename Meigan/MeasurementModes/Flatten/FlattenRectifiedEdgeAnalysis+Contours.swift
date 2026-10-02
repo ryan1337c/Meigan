@@ -2,8 +2,9 @@
 //  FlattenRectifiedEdgeAnalysis+Contours.swift
 //  Meigan
 //
-//  Vision contour request, per-contour candidate extraction, fragment merging, and the
-//  2D geometry helpers (bounding boxes, polyline clipping) they depend on.
+//  Vision contour request, per-contour candidate extraction, and the 2D geometry helpers
+//  (bounding boxes, polyline clipping) they depend on. Each top-level contour becomes its
+//  own candidate; fragments are never merged, so their perimeters are never summed.
 //
 
 import CoreGraphics
@@ -91,52 +92,20 @@ extension FlattenRectifiedEdgeAnalysis {
         }
 
         let outerContourPx = visiblePolylineLength(in: imageBounds, closed: true, points: loop)
-        guard outerContourPx > 0 else { return nil }
+        guard outerContourPx > 0, let dimensions = orientedDimensions(of: loop) else { return nil }
 
         // Outer contour only. Centerline classification via the Zhang–Suen skeleton
         // (`centerlineMeasurement` in `+Skeleton.swift`) is intentionally not wired in for
         // performance; re-enable by mapping `rawVisionPoints` to detection-space and calling it here.
         return ShapeCandidate(
+            contourImage: loop,
             boundingRectImage: clippedRect,
+            widthSegment: dimensions.widthSegment,
+            heightSegment: dimensions.heightSegment,
+            orientationRadians: dimensions.orientationRadians,
             perimeterPixels: outerContourPx,
             lengthKind: .outerContour
         )
-    }
-
-    private static func mergeCandidates(
-        _ candidates: [ShapeCandidate],
-        imageBounds: CGRect,
-        tuning: FlattenShapeDetectionTuning
-    ) -> [ShapeCandidate] {
-        guard !candidates.isEmpty else { return [] }
-        let padding = max(imageBounds.width, imageBounds.height) * tuning.mergePaddingFractionOfLongestEdge
-        var merged: [ShapeCandidate] = []
-
-        for candidate in candidates.sorted(by: { area(of: $0.boundingRectImage) > area(of: $1.boundingRectImage) }) {
-            var current = candidate
-            var didMerge = true
-            while didMerge {
-                didMerge = false
-                for index in merged.indices.reversed() {
-                    let expandedCurrent = current.boundingRectImage.insetBy(dx: -padding, dy: -padding)
-                    let expandedExisting = merged[index].boundingRectImage.insetBy(dx: -padding, dy: -padding)
-                    guard expandedCurrent.intersects(expandedExisting) else { continue }
-                    // Keep the larger candidate's length kind; sum perimeters (existing behavior).
-                    let currentArea = area(of: current.boundingRectImage)
-                    let existingArea = area(of: merged[index].boundingRectImage)
-                    if existingArea > currentArea {
-                        current.lengthKind = merged[index].lengthKind
-                    }
-                    current.boundingRectImage = current.boundingRectImage.union(merged[index].boundingRectImage).intersection(imageBounds)
-                    current.perimeterPixels += merged[index].perimeterPixels
-                    merged.remove(at: index)
-                    didMerge = true
-                }
-            }
-            merged.append(current)
-        }
-
-        return merged
     }
 
     static func makeFindings(
@@ -152,9 +121,7 @@ extension FlattenRectifiedEdgeAnalysis {
             imageArea * tuning.minimumObjectAreaFraction
         )
 
-        let mergedCandidates = mergeCandidates(candidates, imageBounds: imageBounds, tuning: tuning)
-
-        return mergedCandidates.compactMap { candidate in
+        return candidates.compactMap { candidate in
             let clippedRect = candidate.boundingRectImage.intersection(imageBounds)
             let rectArea = area(of: clippedRect)
             guard clippedRect.width >= 2, clippedRect.height >= 2,
@@ -170,10 +137,14 @@ extension FlattenRectifiedEdgeAnalysis {
 
             return FlattenShapeFinding(
                 id: UUID(),
+                contourImage: candidate.contourImage,
                 boundingRectImage: clippedRect,
                 boundingRectNormalized: norm,
-                widthMeters: Float(clippedRect.width / ppm),
-                heightMeters: Float(clippedRect.height / ppm),
+                widthSegment: candidate.widthSegment,
+                heightSegment: candidate.heightSegment,
+                orientationRadians: candidate.orientationRadians,
+                widthMeters: Float(candidate.widthSegment.length / ppm),
+                heightMeters: Float(candidate.heightSegment.length / ppm),
                 perimeterMeters: Float(candidate.perimeterPixels / ppm),
                 lengthKind: candidate.lengthKind
             )

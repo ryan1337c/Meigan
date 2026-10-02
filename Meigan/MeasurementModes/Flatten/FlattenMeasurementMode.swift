@@ -241,7 +241,9 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
 
         let canvasSize = Self.scanCanvasSize(in: arView, footerHeight: host.flattenFooterHeight)
         let measurementUnit = MeasurementUnit.from(storage: host.measurementUnitRaw)
-        DispatchQueue.global(qos: .utility).async { [weak host] in
+        let minimumAnimationDuration: TimeInterval = 1.2
+        let animationDeadline = DispatchTime.now() + minimumAnimationDuration
+        DispatchQueue.global(qos: .userInitiated).async { [weak host] in
             let result = autoreleasepool {
                 let analysis = Self.scanAnalysis(
                     for: points,
@@ -276,8 +278,7 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
                 }()
                 return (analysis, outcome, warpedImage, shapeDetection)
             }
-            let minimumAnimationDuration: TimeInterval = 1.2
-            DispatchQueue.main.asyncAfter(deadline: .now() + minimumAnimationDuration) { [weak host] in
+            DispatchQueue.main.asyncAfter(deadline: animationDeadline) { [weak host] in
                 guard let host else { return }
                 guard host.flattenScanInvalidateGeneration == completionToken else {
                     // Scan invalidated (clear marks, new scan, etc.): drop in-flight result state.
@@ -343,6 +344,12 @@ final class FlattenMeasurementMode: MeasurementModeBehavior {
         guard points.count >= 3 else {
             container.isEnabled = false
             arPlacementLog.notice("rebuildCommittedFillGeometry: ABORT insufficient points for fill")
+            return
+        }
+
+        if liveFlattenFillPreviewActive(on: host) {
+            container.isEnabled = false
+            arPlacementLog.notice("rebuildCommittedFillGeometry: deferred to live preview fill")
             return
         }
 

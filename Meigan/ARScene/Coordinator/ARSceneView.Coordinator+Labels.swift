@@ -46,53 +46,54 @@ enum MeasurementLabelStyle {
     static let labelDistanceScaleMin: Float = 0.3
     static let labelDistanceScaleMax: Float = 12.0
 
-    static func borderedPillMaterial() -> UnlitMaterial {
-        let pixW = 384
-        let ratio = CGFloat(pillHeight / pillWidth)
-        let pixH = max(64, Int(CGFloat(pixW) * ratio))
-        let w = CGFloat(pixW)
-        let h = CGFloat(pixH)
-        let format = UIGraphicsImageRendererFormat()
-        // Transparent outside the pill so the plane isn’t a white rectangle with a rounded stroke inside it.
-        format.opaque = false
-        format.scale = 2.0
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: w, height: h), format: format)
-        let borderWidth: CGFloat = 2.25
-        let image = renderer.image { ctx in
-            let rect = CGRect(x: 0, y: 0, width: w, height: h)
-            ctx.cgContext.clear(rect)
+    static let pillBorderWidth: Float = 0.0005
 
-            // Tiny inset from texture edge for anti-aliasing.
-            let outer = rect.insetBy(dx: 1.0, dy: 1.0)
-            let outerR = min(outer.width, outer.height) * 0.5
-            let outerPath = UIBezierPath(roundedRect: outer, cornerRadius: outerR)
+    /// Opaque capsule geometry (gray border capsule + white inner capsule). Real geometry instead of a
+    /// textured rectangle: transparent texels in a quad still write depth and punch holes in the fill behind.
+    static func makePillEntity() -> ModelEntity {
+        var borderMat = UnlitMaterial()
+        borderMat.color = .init(tint: UIColor(white: 0.82, alpha: 1))
+        var innerMat = UnlitMaterial()
+        innerMat.color = .init(tint: .white)
 
-            // Border = gray “ring”; fill = white inner capsule (same shape, inset).
-            UIColor(white: 0.82, alpha: 1).setFill()
-            outerPath.fill()
+        let outer = ModelEntity(
+            mesh: capsuleMesh(width: pillWidth, height: pillHeight),
+            materials: [borderMat]
+        )
+        let inner = ModelEntity(
+            mesh: capsuleMesh(width: pillWidth - 2 * pillBorderWidth, height: pillHeight - 2 * pillBorderWidth),
+            materials: [innerMat]
+        )
+        inner.position = SIMD3<Float>(0, 0, 0.0003)
+        outer.addChild(inner)
+        return outer
+    }
 
-            let inner = outer.insetBy(dx: borderWidth, dy: borderWidth)
-            guard inner.width > 2, inner.height > 2 else { return }
-            let innerR = min(inner.width, inner.height) * 0.5
-            let innerPath = UIBezierPath(roundedRect: inner, cornerRadius: innerR)
-            UIColor.white.setFill()
-            innerPath.fill()
+    /// Flat capsule in the local XY plane, double-sided (opaque, so coincident windings can't z-fight visibly).
+    private static func capsuleMesh(width: Float, height: Float, segmentsPerCap: Int = 12) -> MeshResource {
+        let r = height * 0.5
+        let cx = max(0, width * 0.5 - r)
+        var positions: [SIMD3<Float>] = [.zero]
+        for i in 0...segmentsPerCap {
+            let a = -Float.pi / 2 + Float.pi * Float(i) / Float(segmentsPerCap)
+            positions.append(SIMD3<Float>(cx + r * cos(a), r * sin(a), 0))
         }
-        guard let cgImage = image.cgImage,
-              let texture = try? TextureResource.generate(
-                  from: cgImage,
-                  options: TextureResource.CreateOptions(semantic: .color)
-              )
-        else {
-            var m = UnlitMaterial()
-            m.color = .init(tint: .white)
-            return m
+        for i in 0...segmentsPerCap {
+            let a = Float.pi / 2 + Float.pi * Float(i) / Float(segmentsPerCap)
+            positions.append(SIMD3<Float>(-cx + r * cos(a), r * sin(a), 0))
         }
-        var m = UnlitMaterial()
-        m.color = .init(tint: .white, texture: .init(texture))
-        // Required so alpha outside the rounded pill shows as clear (not black / opaque quad).
-        m.blending = .transparent(opacity: 1.0)
-        return m
+        let rimCount = UInt32(positions.count - 1)
+        var indices: [UInt32] = []
+        for i in 0..<rimCount {
+            let a = 1 + i
+            let b = 1 + (i + 1) % rimCount
+            indices.append(contentsOf: [0, a, b, 0, b, a])
+        }
+        var descriptor = MeshDescriptor(name: "MeasurementPill")
+        descriptor.positions = MeshBuffers.Positions(positions)
+        descriptor.primitives = .triangles(indices)
+        return (try? MeshResource.generate(from: [descriptor]))
+            ?? MeshResource.generatePlane(width: width, height: height)
     }
 }
 
@@ -100,12 +101,7 @@ extension ARSceneView.Coordinator {
     /// Pill + extruded text stack for one segment readout (centroid-aligned like the original single label).
     static func makeMeasurementLabelStack(displayText: String) -> Entity {
         let root = Entity()
-        let pillMesh = MeshResource.generatePlane(
-            width: MeasurementLabelStyle.pillWidth,
-            depth: MeasurementLabelStyle.pillHeight
-        )
-        let pill = ModelEntity(mesh: pillMesh, materials: [MeasurementLabelStyle.borderedPillMaterial()])
-        pill.orientation = simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(1, 0, 0))
+        let pill = MeasurementLabelStyle.makePillEntity()
         pill.position = SIMD3<Float>(0, 0, -0.0006)
         let font = MeasurementLabelStyle.meshFontForGenerateText()
         let frame = MeasurementLabelStyle.textFrame

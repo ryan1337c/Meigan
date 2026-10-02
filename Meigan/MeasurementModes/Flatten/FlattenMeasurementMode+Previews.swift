@@ -16,6 +16,15 @@ private let arPlacementLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "
 extension FlattenMeasurementMode {
     // MARK: - Flatten previews (draft polyline + fill polygon)
 
+    /// Live preview owns the fill while the user is aiming or dragging a corner; committed fill is hidden so
+    /// two translucent layers never stack (which reads as changing opacity while moving).
+    func liveFlattenFillPreviewActive(on host: ARSceneView.Coordinator) -> Bool {
+        if host.flattenAdjustingPointIndex != nil { return true }
+        guard host.draftSegmentStart != nil else { return false }
+        let segCount = host.committedSegments.count
+        return segCount == 1 || segCount == 2
+    }
+
     /// Draws a dynamic translucent polygon while aiming the 3rd or 4th corner in flatten mode.
     /// - 3rd corner aim (1 committed segment + draft): triangle [P1, P2, hover]
     /// - 4th corner aim (2 committed segments + draft): quad [P1, P2, P3, hover]
@@ -183,77 +192,32 @@ extension FlattenMeasurementMode {
         return (p3, p1)
     }
 
-    /// Builds a double-sided triangle-fan mesh over `points` (>= 3) with a translucent teal material.
+    /// Builds a single-layer mesh over `points` (>= 3) with a translucent teal material.
+    /// Two coplanar windings z-fight and stack alpha unevenly, so only one layer is emitted:
+    /// iOS 18+ disables culling; earlier versions wind the triangles to face the camera.
     func makeFlattenFillEntity(points: [SIMD3<Float>]) -> ModelEntity? {
         guard points.count >= 3 else { return nil }
 
         var descriptor = MeshDescriptor(name: "FlattenFillPreview")
 
-        var positions: [SIMD3<Float>] = []
-        var indices: [UInt32] = []
-
-        // Front-facing triangles
-        for p in points { positions.append(p) }
-
+        var indices: [UInt32]
         if points.count == 3 {
-            // Simple triangle
-            indices.append(contentsOf: [0, 1, 2])
-        } else if points.count == 4 {
-            // Keep the base triangle (P1-P2-P3) and add one extra triangle from P4
-            // to whichever edge of the base triangle is closest.
-            indices.append(contentsOf: [0, 1, 2])
+            indices = [0, 1, 2]
+        } else {
+            // Corners are in perimeter order (P1→P2→P3→P4). Split on diagonal P1–P3.
+            indices = [0, 1, 2, 0, 2, 3]
+        }
 
-            // Find which edge of triangle P1-P2-P3 is closest to P4
-            let p1 = points[0], p2 = points[1], p3 = points[2], p4 = points[3]
-
-            let distToEdge12 = distanceFromPointToSegment3D(p4, p1, p2)
-            let distToEdge23 = distanceFromPointToSegment3D(p4, p2, p3)
-            let distToEdge31 = distanceFromPointToSegment3D(p4, p3, p1)
-
-            if distToEdge12 <= distToEdge23 && distToEdge12 <= distToEdge31 {
-                // Closest to P1-P2: connect P4 to that edge
-                // Triangles: [P1,P2,P4]
-                indices.append(contentsOf: [0, 1, 3])
-            } else if distToEdge23 <= distToEdge31 {
-                // Closest to P2-P3: connect P4 to that edge
-                // Triangles: [P2,P3,P4]
-                indices.append(contentsOf: [1, 2, 3])
-            } else {
-                // Closest to P3-P1: connect P4 to that edge
-                // Triangles: [P3,P1,P4]
-                indices.append(contentsOf: [2, 0, 3])
+        if let cameraWorld = host?.arView?.cameraTransform.translation {
+            let normal = simd_cross(points[1] - points[0], points[2] - points[0])
+            if simd_dot(normal, cameraWorld - points[0]) < 0 {
+                for t in stride(from: 0, to: indices.count, by: 3) {
+                    indices.swapAt(t + 1, t + 2)
+                }
             }
         }
 
-        // Back-facing triangles (duplicated verts, reversed winding for double-sided visibility)
-        let backOffset = UInt32(positions.count)
-        for p in points { positions.append(p) }
-
-        if points.count == 3 {
-            indices.append(contentsOf: [backOffset + 0, backOffset + 2, backOffset + 1])
-        } else if points.count == 4 {
-            // Back face for base triangle (reverse winding)
-            indices.append(contentsOf: [backOffset + 0, backOffset + 2, backOffset + 1])
-
-            let p1 = points[0], p2 = points[1], p3 = points[2], p4 = points[3]
-
-            let distToEdge12 = distanceFromPointToSegment3D(p4, p1, p2)
-            let distToEdge23 = distanceFromPointToSegment3D(p4, p2, p3)
-            let distToEdge31 = distanceFromPointToSegment3D(p4, p3, p1)
-
-            if distToEdge12 <= distToEdge23 && distToEdge12 <= distToEdge31 {
-                indices.append(contentsOf: [backOffset + 0, backOffset + 3, backOffset + 1])
-
-            } else if distToEdge23 <= distToEdge31 {
-                indices.append(contentsOf: [backOffset + 1, backOffset + 3, backOffset + 2])
-
-            } else {
-                indices.append(contentsOf: [backOffset + 2, backOffset + 3, backOffset + 0])
-
-            }
-        }
-
-        descriptor.positions = MeshBuffers.Positions(positions)
+        descriptor.positions = MeshBuffers.Positions(Array(points.prefix(4)))
         descriptor.primitives = .triangles(indices)
 
         do {
@@ -265,6 +229,9 @@ extension FlattenMeasurementMode {
             var material = UnlitMaterial()
             material.color = .init(tint: translucentTint)
             material.blending = .transparent(opacity: .init(floatLiteral: 1.0))
+            if #available(iOS 18.0, *) {
+                material.faceCulling = .none
+            }
             return ModelEntity(mesh: mesh, materials: [material])
         } catch {
             arPlacementLog.warning("makeFlattenFillEntity: mesh generation failed: \(error.localizedDescription, privacy: .public)")

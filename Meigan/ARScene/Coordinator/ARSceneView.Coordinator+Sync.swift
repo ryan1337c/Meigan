@@ -37,12 +37,7 @@ extension ARSceneView.Coordinator {
         let draftLabelRoot = Entity()
         draftLabelRoot.isEnabled = false
 
-        let draftPillMesh = MeshResource.generatePlane(
-            width: MeasurementLabelStyle.pillWidth,
-            depth: MeasurementLabelStyle.pillHeight
-        )
-        let draftPill = ModelEntity(mesh: draftPillMesh, materials: [MeasurementLabelStyle.borderedPillMaterial()])
-        draftPill.orientation = simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(1, 0, 0))
+        let draftPill = MeasurementLabelStyle.makePillEntity()
         draftPill.position = SIMD3<Float>(0, 0, -0.0006)
 
         let draftText = ModelEntity()
@@ -65,14 +60,14 @@ extension ARSceneView.Coordinator {
         let committedContainerFill = Entity()
         committedContainerFill.isEnabled = false
 
+        anchor.addChild(committedContainerFill)
+        anchor.addChild(fillPreview)
         anchor.addChild(committedContainerLines)
         anchor.addChild(previewContainer)
         anchor.addChild(markersContainer)
         anchor.addChild(committedLabelsContainer)
         anchor.addChild(draftLabelRoot)
         anchor.addChild(midDot)
-        anchor.addChild(committedContainerFill)
-        anchor.addChild(fillPreview)
 
         committedLinesContainer = committedContainerLines
         previewLinesContainer = previewContainer
